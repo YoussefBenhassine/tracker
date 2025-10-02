@@ -70,8 +70,29 @@ app.use('/attachments', express.static(ATTACHMENTS_DIR));
 // 1x1 transparent GIF for tracking pixels
 const transparentGif = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64');
 
+const nowIso = () => new Date().toISOString();
+
+const ensureEmailDocument = async (emailId, defaults = {}) => {
+  const baseDefaults = {
+    id: emailId,
+    sentAt: nowIso(),
+    status: 'sent',
+    openCount: 0,
+    clickCount: 0,
+    attachmentDownloads: 0,
+    attachmentOpens: 0,
+    ...defaults,
+  };
+
+  await emailTrackingCollection.updateOne(
+    { id: emailId },
+    { $setOnInsert: baseDefaults },
+    { upsert: true }
+  );
+};
+
 // Open tracking endpoint
-app.get('/track/open/:emailId', (req, res) => {
+app.get('/track/open/:emailId', async (req, res) => {
   const { emailId } = req.params;
   const { r: recipientEmail } = req.query;
   const userAgent = req.get('User-Agent') || '';
@@ -79,28 +100,29 @@ app.get('/track/open/:emailId', (req, res) => {
 
   console.log(`Email opened: ${emailId} by ${recipientEmail}`);
 
-  // Record the open event
   const openData = {
     id: crypto.randomBytes(16).toString('hex'),
     emailId,
     recipientEmail,
     userAgent,
     ipAddress,
-    timestamp: new Date().toISOString()
+    timestamp: nowIso()
   };
 
-  emailOpens.push(openData);
-
-  // Update email tracking record
-  const emailIndex = emailTracking.findIndex(email => email.id === emailId);
-  if (emailIndex !== -1) {
-    emailTracking[emailIndex].openCount = (emailTracking[emailIndex].openCount || 0) + 1;
-    emailTracking[emailIndex].lastOpenedAt = new Date().toISOString();
+  try {
+    await ensureEmailDocument(emailId, { recipientEmail });
+    await emailOpensCollection.insertOne(openData);
+    await emailTrackingCollection.updateOne(
+      { id: emailId },
+      {
+        $inc: { openCount: 1 },
+        $set: { lastOpenedAt: openData.timestamp, recipientEmail }
+      }
+    );
+  } catch (error) {
+    console.error('Error recording email open:', error);
   }
 
-  saveData();
-
-  // Return transparent GIF
   res.set({
     'Content-Type': 'image/gif',
     'Content-Length': transparentGif.length,
@@ -112,15 +134,18 @@ app.get('/track/open/:emailId', (req, res) => {
 });
 
 // Click tracking endpoint
-app.get('/track/click/:emailId', (req, res) => {
+app.get('/track/click/:emailId', async (req, res) => {
   const { emailId } = req.params;
   const { url, r: recipientEmail } = req.query;
   const userAgent = req.get('User-Agent') || '';
   const ipAddress = req.ip || req.connection.remoteAddress || '';
 
+  if (!url) {
+    return res.status(400).send('Invalid URL');
+  }
+
   console.log(`Link clicked: ${url} in email ${emailId} by ${recipientEmail}`);
 
-  // Record the click event
   const clickData = {
     id: crypto.randomBytes(16).toString('hex'),
     emailId,
@@ -128,30 +153,28 @@ app.get('/track/click/:emailId', (req, res) => {
     recipientEmail,
     userAgent,
     ipAddress,
-    timestamp: new Date().toISOString()
+    timestamp: nowIso()
   };
 
-  emailClicks.push(clickData);
-
-  // Update email tracking record
-  const emailIndex = emailTracking.findIndex(email => email.id === emailId);
-  if (emailIndex !== -1) {
-    emailTracking[emailIndex].clickCount = (emailTracking[emailIndex].clickCount || 0) + 1;
-    emailTracking[emailIndex].lastClickedAt = new Date().toISOString();
+  try {
+    await ensureEmailDocument(emailId, { recipientEmail });
+    await emailClicksCollection.insertOne(clickData);
+    await emailTrackingCollection.updateOne(
+      { id: emailId },
+      {
+        $inc: { clickCount: 1 },
+        $set: { lastClickedAt: clickData.timestamp, recipientEmail }
+      }
+    );
+  } catch (error) {
+    console.error('Error recording link click:', error);
   }
 
-  saveData();
-
-  // Redirect to the original URL
-  if (url) {
-    res.redirect(decodeURIComponent(url));
-  } else {
-    res.status(400).send('Invalid URL');
-  }
+  res.redirect(decodeURIComponent(url));
 });
 
 // Attachment download tracking endpoint
-app.get('/track/attachment/:attachmentId', (req, res) => {
+app.get('/track/attachment/:attachmentId', async (req, res) => {
   const { attachmentId } = req.params;
   const { token, action = 'download', r: recipientEmail = '' } = req.query;
   const userAgent = req.get('User-Agent') || '';
@@ -159,47 +182,46 @@ app.get('/track/attachment/:attachmentId', (req, res) => {
 
   console.log(`Attachment download: ${attachmentId}`);
 
-  // Find attachment record
-  const attachment = attachmentTracking.find(att => att.id === attachmentId && att.secureToken === token);
-  if (!attachment) {
-    return res.status(404).send('Attachment not found or invalid token');
-  }
-
-  // Record the download event
-  const downloadData = {
-    id: crypto.randomBytes(16).toString('hex'),
-    attachmentId,
-    recipientEmail,
-    userAgent,
-    ipAddress,
-    timestamp: new Date().toISOString(),
-    type: action
-  };
-
-  attachmentDownloads.push(downloadData);
-
-  // Update email tracking record
-  const emailIndex = emailTracking.findIndex(email => email.id === attachment.emailId);
-  if (emailIndex !== -1) {
-    if (action === 'open') {
-      emailTracking[emailIndex].attachmentOpens = (emailTracking[emailIndex].attachmentOpens || 0) + 1;
-    } else {
-      emailTracking[emailIndex].attachmentDownloads = (emailTracking[emailIndex].attachmentDownloads || 0) + 1;
+  try {
+    const attachment = await attachmentTrackingCollection.findOne({ id: attachmentId, secureToken: token });
+    if (!attachment) {
+      return res.status(404).send('Attachment not found or invalid token');
     }
-  }
 
-  saveData();
+    const downloadData = {
+      id: crypto.randomBytes(16).toString('hex'),
+      attachmentId,
+      recipientEmail,
+      userAgent,
+      ipAddress,
+      timestamp: nowIso(),
+      type: action
+    };
 
-  // Serve the file from persistent attachments directory
-  const filePath = path.join(ATTACHMENTS_DIR, attachment.trackedFileName);
-  if (fs.existsSync(filePath)) {
-    res.set({
-      'Content-Type': attachment.contentType || 'application/octet-stream',
-      'Content-Disposition': `attachment; filename="${attachment.originalFileName}"`
-    });
-    res.sendFile(filePath);
-  } else {
+    await attachmentDownloadsCollection.insertOne(downloadData);
+
+    const updateFields = action === 'open'
+      ? { $inc: { attachmentOpens: 1 } }
+      : { $inc: { attachmentDownloads: 1 } };
+
+    await emailTrackingCollection.updateOne(
+      { id: attachment.emailId },
+      updateFields
+    );
+
+    const filePath = path.join(ATTACHMENTS_DIR, attachment.trackedFileName);
+    if (fs.existsSync(filePath)) {
+      res.set({
+        'Content-Type': attachment.contentType || 'application/octet-stream',
+        'Content-Disposition': `attachment; filename="${attachment.originalFileName}"`
+      });
+      return res.sendFile(filePath);
+    }
+
     res.status(404).send('File not found');
+  } catch (error) {
+    console.error('Error recording attachment download:', error);
+    res.status(500).send('Server error');
   }
 });
 
@@ -298,27 +320,64 @@ app.get('/privacy', (req, res) => {
 });
 
 // API endpoints for the Electron app to sync data
-app.get('/api/tracking-data', (req, res) => {
-  res.json({
-    emailTracking,
-    emailOpens,
-    emailClicks,
-    attachmentTracking,
-    attachmentDownloads
-  });
+app.get('/api/tracking-data', async (req, res) => {
+  try {
+    const [emailTracking, emailOpens, emailClicks, attachmentTracking, attachmentDownloads] = await Promise.all([
+      emailTrackingCollection.find().toArray(),
+      emailOpensCollection.find().toArray(),
+      emailClicksCollection.find().toArray(),
+      attachmentTrackingCollection.find().toArray(),
+      attachmentDownloadsCollection.find().toArray()
+    ]);
+
+    res.json({
+      emailTracking,
+      emailOpens,
+      emailClicks,
+      attachmentTracking,
+      attachmentDownloads
+    });
+  } catch (error) {
+    console.error('Error fetching tracking data:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch tracking data' });
+  }
 });
 
-app.post('/api/sync-tracking-data', (req, res) => {
-  const { emailTracking: newEmailTracking, emailOpens: newEmailOpens, emailClicks: newEmailClicks, attachmentTracking: newAttachmentTracking, attachmentDownloads: newAttachmentDownloads } = req.body;
-  
-  if (newEmailTracking) emailTracking = newEmailTracking;
-  if (newEmailOpens) emailOpens = newEmailOpens;
-  if (newEmailClicks) emailClicks = newEmailClicks;
-  if (newAttachmentTracking) attachmentTracking = newAttachmentTracking;
-  if (newAttachmentDownloads) attachmentDownloads = newAttachmentDownloads;
-  
-  saveData();
-  res.json({ success: true });
+app.post('/api/sync-tracking-data', async (req, res) => {
+  try {
+    const {
+      emailTracking: newEmailTracking,
+      emailOpens: newEmailOpens,
+      emailClicks: newEmailClicks,
+      attachmentTracking: newAttachmentTracking,
+      attachmentDownloads: newAttachmentDownloads
+    } = req.body;
+
+    if (newEmailTracking) {
+      await Promise.all(newEmailTracking.map(doc => ensureEmailDocument(doc.id, doc)));
+    }
+
+    if (newEmailOpens) {
+      await emailOpensCollection.insertMany(newEmailOpens);
+    }
+
+    if (newEmailClicks) {
+      await emailClicksCollection.insertMany(newEmailClicks);
+    }
+
+    if (newAttachmentTracking) {
+      await attachmentTrackingCollection.insertMany(newAttachmentTracking, { ordered: false }).catch(() => {});
+    }
+
+    if (newAttachmentDownloads) {
+      await attachmentDownloadsCollection.insertMany(newAttachmentDownloads);
+    }
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Error syncing tracking data:', error);
+    res.status(500).json({ success: false, error: 'Failed to sync tracking data' });
+  }
 });
 
 // Health check endpoint
@@ -344,16 +403,18 @@ app.listen(PORT, () => {
 });
 
 // Graceful shutdown
-process.on('SIGINT', () => {
+const gracefulShutdown = async () => {
   console.log('\nShutting down tracking server...');
-  saveData();
-  process.exit(0);
-});
+  try {
+    await client.close();
+  } catch (error) {
+    console.error('Error closing MongoDB client:', error);
+  } finally {
+    process.exit(0);
+  }
+};
 
-process.on('SIGTERM', () => {
-  console.log('\nShutting down tracking server...');
-  saveData();
-  process.exit(0);
-});
+process.on('SIGINT', gracefulShutdown);
+process.on('SIGTERM', gracefulShutdown);
 
 
