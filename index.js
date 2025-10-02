@@ -20,10 +20,22 @@ if (!MONGO_URI) {
   process.exit(1);
 }
 
-const client = new MongoClient(MONGO_URI, {
+const mongoOptions = {
   maxPoolSize: 20,
   serverSelectionTimeoutMS: 5000
-});
+};
+
+if (process.env.MONGO_TLS_CA_FILE) {
+  mongoOptions.tls = true;
+  mongoOptions.tlsCAFile = path.resolve(process.env.MONGO_TLS_CA_FILE);
+}
+
+if (process.env.MONGO_TLS_ALLOW_INVALID === 'true') {
+  mongoOptions.tls = true;
+  mongoOptions.tlsAllowInvalidCertificates = true;
+}
+
+const client = new MongoClient(MONGO_URI, mongoOptions);
 
 let db;
 let emailTrackingCollection;
