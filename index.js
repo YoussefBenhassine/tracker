@@ -395,12 +395,24 @@ app.get('/health', (req, res) => {
   });
 });
 
-// Start server
-app.listen(PORT, () => {
-  console.log(`Tracking server running on port ${PORT}`);
-  console.log(`Health check: http://localhost:${PORT}/health`);
-  console.log(`Privacy policy: http://localhost:${PORT}/privacy`);
-});
+// Start server (ensure DB connection first)
+const startServer = async () => {
+  try {
+    await connectToDatabase();
+    console.log('Connected to MongoDB');
+
+    app.listen(PORT, () => {
+      console.log(`Tracking server running on port ${PORT}`);
+      console.log(`Health check: http://localhost:${PORT}/health`);
+      console.log(`Privacy policy: http://localhost:${PORT}/privacy`);
+    });
+  } catch (error) {
+    console.error('Failed to start server:', error);
+    process.exit(1);
+  }
+};
+
+startServer();
 
 // Graceful shutdown
 const gracefulShutdown = async () => {
