@@ -212,6 +212,8 @@ app.get('/track/attachment/:attachmentId', async (req, res) => {
 
     await attachmentDownloadsCollection.insertOne(downloadData);
 
+    await ensureEmailDocument(attachment.emailId, { recipientEmail });
+
     const updateFields = action === 'open'
       ? { $inc: { attachmentOpens: 1 } }
       : { $inc: { attachmentDownloads: 1 } };
@@ -365,23 +367,23 @@ app.post('/api/sync-tracking-data', async (req, res) => {
       attachmentDownloads: newAttachmentDownloads
     } = req.body;
 
-    if (newEmailTracking) {
+    if (Array.isArray(newEmailTracking) && newEmailTracking.length) {
       await Promise.all(newEmailTracking.map(doc => ensureEmailDocument(doc.id, doc)));
     }
 
-    if (newEmailOpens) {
+    if (Array.isArray(newEmailOpens) && newEmailOpens.length) {
       await emailOpensCollection.insertMany(newEmailOpens);
     }
 
-    if (newEmailClicks) {
+    if (Array.isArray(newEmailClicks) && newEmailClicks.length) {
       await emailClicksCollection.insertMany(newEmailClicks);
     }
 
-    if (newAttachmentTracking) {
+    if (Array.isArray(newAttachmentTracking) && newAttachmentTracking.length) {
       await attachmentTrackingCollection.insertMany(newAttachmentTracking, { ordered: false }).catch(() => {});
     }
 
-    if (newAttachmentDownloads) {
+    if (Array.isArray(newAttachmentDownloads) && newAttachmentDownloads.length) {
       await attachmentDownloadsCollection.insertMany(newAttachmentDownloads);
     }
 
