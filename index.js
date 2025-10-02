@@ -1,7 +1,9 @@
+require('dotenv').config();
 const express = require('express');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
+const { MongoClient } = require('mongodb');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -12,7 +14,45 @@ app.set('trust proxy', true);
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Persistent data directory (supports Render Disks)
+const MONGO_URI = process.env.MONGO_URI;
+if (!MONGO_URI) {
+  console.error('MONGO_URI environment variable is not set.');
+  process.exit(1);
+}
+
+const client = new MongoClient(MONGO_URI, {
+  maxPoolSize: 20,
+  serverSelectionTimeoutMS: 5000
+});
+
+let db;
+let emailTrackingCollection;
+let emailOpensCollection;
+let emailClicksCollection;
+let attachmentTrackingCollection;
+let attachmentDownloadsCollection;
+
+async function connectToDatabase() {
+  await client.connect();
+  db = client.db(process.env.MONGO_DB_NAME || 'altara_tracking');
+
+  emailTrackingCollection = db.collection('email_tracking');
+  emailOpensCollection = db.collection('email_opens');
+  emailClicksCollection = db.collection('email_clicks');
+  attachmentTrackingCollection = db.collection('attachment_tracking');
+  attachmentDownloadsCollection = db.collection('attachment_downloads');
+
+  await Promise.all([
+    emailTrackingCollection.createIndex({ id: 1 }, { unique: true }),
+    emailOpensCollection.createIndex({ emailId: 1 }),
+    emailClicksCollection.createIndex({ emailId: 1 }),
+    attachmentTrackingCollection.createIndex({ id: 1 }, { unique: true }),
+    attachmentTrackingCollection.createIndex({ emailId: 1 }),
+    attachmentDownloadsCollection.createIndex({ attachmentId: 1 })
+  ]);
+}
+
+// Persistent data directory (supports Render Disks) - still used for attachments
 const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), 'data');
 if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -29,58 +69,6 @@ app.use('/attachments', express.static(ATTACHMENTS_DIR));
 
 // 1x1 transparent GIF for tracking pixels
 const transparentGif = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64');
-
-// Email tracking data storage (in production, use a proper database)
-let emailTracking = [];
-let emailOpens = [];
-let emailClicks = [];
-let attachmentTracking = [];
-let attachmentDownloads = [];
-
-// Load existing data from files if they exist
-const loadData = () => {
-  try {
-    const emailTrackingPath = path.join(DATA_DIR, 'email_tracking.json');
-    const emailOpensPath = path.join(DATA_DIR, 'email_opens.json');
-    const emailClicksPath = path.join(DATA_DIR, 'email_clicks.json');
-    const attachmentTrackingPath = path.join(DATA_DIR, 'attachment_tracking.json');
-    const attachmentDownloadsPath = path.join(DATA_DIR, 'attachment_downloads.json');
-
-    if (fs.existsSync(emailTrackingPath)) {
-      emailTracking = JSON.parse(fs.readFileSync(emailTrackingPath, 'utf8'));
-    }
-    if (fs.existsSync(emailOpensPath)) {
-      emailOpens = JSON.parse(fs.readFileSync(emailOpensPath, 'utf8'));
-    }
-    if (fs.existsSync(emailClicksPath)) {
-      emailClicks = JSON.parse(fs.readFileSync(emailClicksPath, 'utf8'));
-    }
-    if (fs.existsSync(attachmentTrackingPath)) {
-      attachmentTracking = JSON.parse(fs.readFileSync(attachmentTrackingPath, 'utf8'));
-    }
-    if (fs.existsSync(attachmentDownloadsPath)) {
-      attachmentDownloads = JSON.parse(fs.readFileSync(attachmentDownloadsPath, 'utf8'));
-    }
-  } catch (error) {
-    console.error('Error loading tracking data:', error);
-  }
-};
-
-// Save data to files
-const saveData = () => {
-  try {
-    fs.writeFileSync(path.join(DATA_DIR, 'email_tracking.json'), JSON.stringify(emailTracking, null, 2));
-    fs.writeFileSync(path.join(DATA_DIR, 'email_opens.json'), JSON.stringify(emailOpens, null, 2));
-    fs.writeFileSync(path.join(DATA_DIR, 'email_clicks.json'), JSON.stringify(emailClicks, null, 2));
-    fs.writeFileSync(path.join(DATA_DIR, 'attachment_tracking.json'), JSON.stringify(attachmentTracking, null, 2));
-    fs.writeFileSync(path.join(DATA_DIR, 'attachment_downloads.json'), JSON.stringify(attachmentDownloads, null, 2));
-  } catch (error) {
-    console.error('Error saving tracking data:', error);
-  }
-};
-
-// Load data on startup
-loadData();
 
 // Open tracking endpoint
 app.get('/track/open/:emailId', (req, res) => {
@@ -165,7 +153,7 @@ app.get('/track/click/:emailId', (req, res) => {
 // Attachment download tracking endpoint
 app.get('/track/attachment/:attachmentId', (req, res) => {
   const { attachmentId } = req.params;
-  const { token } = req.query;
+  const { token, action = 'download', r: recipientEmail = '' } = req.query;
   const userAgent = req.get('User-Agent') || '';
   const ipAddress = req.ip || req.connection.remoteAddress || '';
 
@@ -181,10 +169,11 @@ app.get('/track/attachment/:attachmentId', (req, res) => {
   const downloadData = {
     id: crypto.randomBytes(16).toString('hex'),
     attachmentId,
-    recipientEmail: '', // Could be passed as query param if needed
+    recipientEmail,
     userAgent,
     ipAddress,
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
+    type: action
   };
 
   attachmentDownloads.push(downloadData);
@@ -192,7 +181,11 @@ app.get('/track/attachment/:attachmentId', (req, res) => {
   // Update email tracking record
   const emailIndex = emailTracking.findIndex(email => email.id === attachment.emailId);
   if (emailIndex !== -1) {
-    emailTracking[emailIndex].attachmentDownloads = (emailTracking[emailIndex].attachmentDownloads || 0) + 1;
+    if (action === 'open') {
+      emailTracking[emailIndex].attachmentOpens = (emailTracking[emailIndex].attachmentOpens || 0) + 1;
+    } else {
+      emailTracking[emailIndex].attachmentDownloads = (emailTracking[emailIndex].attachmentDownloads || 0) + 1;
+    }
   }
 
   saveData();
