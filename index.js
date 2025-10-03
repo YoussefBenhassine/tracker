@@ -1,217 +1,318 @@
-const express = require('express');
-const path = require('path');
-const fs = require('fs');
-const crypto = require('crypto');
+require("dotenv").config();
+const express = require("express");
+const path = require("path");
+const fs = require("fs");
+const crypto = require("crypto");
+const { MongoClient } = require("mongodb");
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 // Trust reverse proxy (e.g., Render) to get correct client IPs
-app.set('trust proxy', true);
+app.set("trust proxy", true);
 
 // Middleware
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Persistent data directory (supports Render Disks)
-const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), 'data');
+const MONGO_URI = process.env.MONGO_URI;
+if (!MONGO_URI) {
+  console.error("MONGO_URI environment variable is not set.");
+  process.exit(1);
+}
+
+const mongoOptions = {
+  maxPoolSize: 20,
+  serverSelectionTimeoutMS: 5000,
+};
+
+if (process.env.MONGO_TLS_CA_FILE) {
+  mongoOptions.tls = true;
+  mongoOptions.tlsCAFile = path.resolve(process.env.MONGO_TLS_CA_FILE);
+}
+
+if (process.env.MONGO_TLS_ALLOW_INVALID === "true") {
+  mongoOptions.tls = true;
+  mongoOptions.tlsAllowInvalidCertificates = true;
+}
+
+const client = new MongoClient(MONGO_URI, mongoOptions);
+
+let db;
+let emailTrackingCollection;
+let emailOpensCollection;
+let emailClicksCollection;
+let attachmentTrackingCollection;
+let attachmentDownloadsCollection;
+
+async function connectToDatabase() {
+  await client.connect();
+  db = client.db(process.env.MONGO_DB_NAME || "altara_tracking");
+
+  emailTrackingCollection = db.collection("email_tracking");
+  emailOpensCollection = db.collection("email_opens");
+  emailClicksCollection = db.collection("email_clicks");
+  attachmentTrackingCollection = db.collection("attachment_tracking");
+  attachmentDownloadsCollection = db.collection("attachment_downloads");
+
+  await Promise.all([
+    emailTrackingCollection.createIndex({ id: 1 }, { unique: true }),
+    emailOpensCollection.createIndex({ emailId: 1 }),
+    emailClicksCollection.createIndex({ emailId: 1 }),
+    attachmentTrackingCollection.createIndex({ id: 1 }, { unique: true }),
+    attachmentTrackingCollection.createIndex({ emailId: 1 }),
+    attachmentDownloadsCollection.createIndex({ attachmentId: 1 }),
+  ]);
+}
+
+// Persistent data directory (supports Render Disks) - still used for attachments
+const DATA_DIR = process.env.DATA_DIR || path.join(process.cwd(), "data");
 if (!fs.existsSync(DATA_DIR)) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
 }
 
 // Ensure attachments directory exists within DATA_DIR
-const ATTACHMENTS_DIR = path.join(DATA_DIR, 'attachments');
+const ATTACHMENTS_DIR = path.join(DATA_DIR, "attachments");
 if (!fs.existsSync(ATTACHMENTS_DIR)) {
   fs.mkdirSync(ATTACHMENTS_DIR, { recursive: true });
 }
 
 // Serve static files from persistent attachments directory
-app.use('/attachments', express.static(ATTACHMENTS_DIR));
+app.use("/attachments", express.static(ATTACHMENTS_DIR));
 
 // 1x1 transparent GIF for tracking pixels
-const transparentGif = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64');
+const transparentGif = Buffer.from(
+  "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7",
+  "base64"
+);
 
-// Email tracking data storage (in production, use a proper database)
-let emailTracking = [];
-let emailOpens = [];
-let emailClicks = [];
-let attachmentTracking = [];
-let attachmentDownloads = [];
+const nowIso = () => new Date().toISOString();
 
-// Load existing data from files if they exist
-const loadData = () => {
-  try {
-    const emailTrackingPath = path.join(DATA_DIR, 'email_tracking.json');
-    const emailOpensPath = path.join(DATA_DIR, 'email_opens.json');
-    const emailClicksPath = path.join(DATA_DIR, 'email_clicks.json');
-    const attachmentTrackingPath = path.join(DATA_DIR, 'attachment_tracking.json');
-    const attachmentDownloadsPath = path.join(DATA_DIR, 'attachment_downloads.json');
+const ensureEmailDocument = async (emailId, defaults = {}) => {
+  const baseDefaults = {
+    id: emailId,
+    sentAt: nowIso(),
+    status: "sent",
+    openCount: 0,
+    clickCount: 0,
+    attachmentDownloads: 0,
+    attachmentOpens: 0,
+    ...defaults,
+  };
 
-    if (fs.existsSync(emailTrackingPath)) {
-      emailTracking = JSON.parse(fs.readFileSync(emailTrackingPath, 'utf8'));
-    }
-    if (fs.existsSync(emailOpensPath)) {
-      emailOpens = JSON.parse(fs.readFileSync(emailOpensPath, 'utf8'));
-    }
-    if (fs.existsSync(emailClicksPath)) {
-      emailClicks = JSON.parse(fs.readFileSync(emailClicksPath, 'utf8'));
-    }
-    if (fs.existsSync(attachmentTrackingPath)) {
-      attachmentTracking = JSON.parse(fs.readFileSync(attachmentTrackingPath, 'utf8'));
-    }
-    if (fs.existsSync(attachmentDownloadsPath)) {
-      attachmentDownloads = JSON.parse(fs.readFileSync(attachmentDownloadsPath, 'utf8'));
-    }
-  } catch (error) {
-    console.error('Error loading tracking data:', error);
-  }
+  await emailTrackingCollection.updateOne(
+    { id: emailId },
+    { $setOnInsert: baseDefaults },
+    { upsert: true }
+  );
 };
-
-// Save data to files
-const saveData = () => {
-  try {
-    fs.writeFileSync(path.join(DATA_DIR, 'email_tracking.json'), JSON.stringify(emailTracking, null, 2));
-    fs.writeFileSync(path.join(DATA_DIR, 'email_opens.json'), JSON.stringify(emailOpens, null, 2));
-    fs.writeFileSync(path.join(DATA_DIR, 'email_clicks.json'), JSON.stringify(emailClicks, null, 2));
-    fs.writeFileSync(path.join(DATA_DIR, 'attachment_tracking.json'), JSON.stringify(attachmentTracking, null, 2));
-    fs.writeFileSync(path.join(DATA_DIR, 'attachment_downloads.json'), JSON.stringify(attachmentDownloads, null, 2));
-  } catch (error) {
-    console.error('Error saving tracking data:', error);
-  }
-};
-
-// Load data on startup
-loadData();
 
 // Open tracking endpoint
-app.get('/track/open/:emailId', (req, res) => {
+app.get("/track/open/:emailId", async (req, res) => {
   const { emailId } = req.params;
   const { r: recipientEmail } = req.query;
-  const userAgent = req.get('User-Agent') || '';
-  const ipAddress = req.ip || req.connection.remoteAddress || '';
+  const userAgent = req.get("User-Agent") || "";
+  const ipAddress = req.ip || req.connection.remoteAddress || "";
 
-  console.log(`Email opened: ${emailId} by ${recipientEmail}`);
+  // Validation to prevent false opens
+  const isAutomatedRequest = () => {
+    // Check for automated user agents
+    const automatedAgents = [
+      'bot', 'crawler', 'spider', 'scraper', 'preview', 'validator',
+      'checker', 'monitor', 'scanner', 'fetcher', 'downloader',
+      'email', 'mail', 'client', 'server', 'daemon', 'service'
+    ];
+    
+    const lowerUserAgent = userAgent.toLowerCase();
+    if (automatedAgents.some(agent => lowerUserAgent.includes(agent))) {
+      return true;
+    }
 
-  // Record the open event
+    // Check for common email service IPs or localhost
+    if (ipAddress === '127.0.0.1' || ipAddress === '::1' || ipAddress === 'localhost') {
+      return true;
+    }
+
+    // Check for missing or suspicious user agents
+    if (!userAgent || userAgent.length < 10) {
+      return true;
+    }
+
+    return false;
+  };
+
+  // Check if this is likely an automated request
+  if (isAutomatedRequest()) {
+    console.log(`Skipping automated open tracking: ${emailId} - User-Agent: ${userAgent}, IP: ${ipAddress}`);
+    res.set({
+      "Content-Type": "image/gif",
+      "Content-Length": transparentGif.length,
+      "Cache-Control": "no-cache, no-store, must-revalidate",
+      Pragma: "no-cache",
+      Expires: "0",
+    });
+    return res.send(transparentGif);
+  }
+
+  // Additional validation: Check if email was sent recently (within last 30 seconds)
+  try {
+    const emailDoc = await emailTrackingCollection.findOne({ id: emailId });
+    if (emailDoc) {
+      const sentTime = new Date(emailDoc.sentAt);
+      const now = new Date();
+      const timeDiff = now - sentTime;
+      
+      // If email was sent less than 30 seconds ago, it's likely a false open
+      if (timeDiff < 1000) { // 30 seconds
+        console.log(`Skipping immediate open tracking: ${emailId} - Email sent ${timeDiff}ms ago`);
+        res.set({
+          "Content-Type": "image/gif",
+          "Content-Length": transparentGif.length,
+          "Cache-Control": "no-cache, no-store, must-revalidate",
+          Pragma: "no-cache",
+          Expires: "0",
+        });
+        return res.send(transparentGif);
+      }
+    }
+  } catch (error) {
+    console.error("Error checking email send time:", error);
+  }
+
+  console.log(`Email opened: ${emailId} by ${recipientEmail} - User-Agent: ${userAgent}, IP: ${ipAddress}`);
+
   const openData = {
-    id: crypto.randomBytes(16).toString('hex'),
+    id: crypto.randomBytes(16).toString("hex"),
     emailId,
     recipientEmail,
     userAgent,
     ipAddress,
-    timestamp: new Date().toISOString()
+    timestamp: nowIso(),
   };
 
-  emailOpens.push(openData);
-
-  // Update email tracking record
-  const emailIndex = emailTracking.findIndex(email => email.id === emailId);
-  if (emailIndex !== -1) {
-    emailTracking[emailIndex].openCount = (emailTracking[emailIndex].openCount || 0) + 1;
-    emailTracking[emailIndex].lastOpenedAt = new Date().toISOString();
+  try {
+    await ensureEmailDocument(emailId, { recipientEmail });
+    await emailOpensCollection.insertOne(openData);
+    await emailTrackingCollection.updateOne(
+      { id: emailId },
+      {
+        $inc: { openCount: 1 },
+        $set: { lastOpenedAt: openData.timestamp, recipientEmail },
+      }
+    );
+  } catch (error) {
+    console.error("Error recording email open:", error);
   }
 
-  saveData();
-
-  // Return transparent GIF
   res.set({
-    'Content-Type': 'image/gif',
-    'Content-Length': transparentGif.length,
-    'Cache-Control': 'no-cache, no-store, must-revalidate',
-    'Pragma': 'no-cache',
-    'Expires': '0'
+    "Content-Type": "image/gif",
+    "Content-Length": transparentGif.length,
+    "Cache-Control": "no-cache, no-store, must-revalidate",
+    Pragma: "no-cache",
+    Expires: "0",
   });
   res.send(transparentGif);
 });
 
 // Click tracking endpoint
-app.get('/track/click/:emailId', (req, res) => {
+app.get("/track/click/:emailId", async (req, res) => {
   const { emailId } = req.params;
   const { url, r: recipientEmail } = req.query;
-  const userAgent = req.get('User-Agent') || '';
-  const ipAddress = req.ip || req.connection.remoteAddress || '';
+  const userAgent = req.get("User-Agent") || "";
+  const ipAddress = req.ip || req.connection.remoteAddress || "";
+
+  if (!url) {
+    return res.status(400).send("Invalid URL");
+  }
 
   console.log(`Link clicked: ${url} in email ${emailId} by ${recipientEmail}`);
 
-  // Record the click event
   const clickData = {
-    id: crypto.randomBytes(16).toString('hex'),
+    id: crypto.randomBytes(16).toString("hex"),
     emailId,
     url,
     recipientEmail,
     userAgent,
     ipAddress,
-    timestamp: new Date().toISOString()
+    timestamp: nowIso(),
   };
 
-  emailClicks.push(clickData);
-
-  // Update email tracking record
-  const emailIndex = emailTracking.findIndex(email => email.id === emailId);
-  if (emailIndex !== -1) {
-    emailTracking[emailIndex].clickCount = (emailTracking[emailIndex].clickCount || 0) + 1;
-    emailTracking[emailIndex].lastClickedAt = new Date().toISOString();
+  try {
+    await ensureEmailDocument(emailId, { recipientEmail });
+    await emailClicksCollection.insertOne(clickData);
+    await emailTrackingCollection.updateOne(
+      { id: emailId },
+      {
+        $inc: { clickCount: 1 },
+        $set: { lastClickedAt: clickData.timestamp, recipientEmail },
+      }
+    );
+  } catch (error) {
+    console.error("Error recording link click:", error);
   }
 
-  saveData();
-
-  // Redirect to the original URL
-  if (url) {
-    res.redirect(decodeURIComponent(url));
-  } else {
-    res.status(400).send('Invalid URL');
-  }
+  res.redirect(decodeURIComponent(url));
 });
 
 // Attachment download tracking endpoint
-app.get('/track/attachment/:attachmentId', (req, res) => {
+app.get("/track/attachment/:attachmentId", async (req, res) => {
   const { attachmentId } = req.params;
-  const { token } = req.query;
-  const userAgent = req.get('User-Agent') || '';
-  const ipAddress = req.ip || req.connection.remoteAddress || '';
+  const { token, action = "download", r: recipientEmail = "" } = req.query;
+  const userAgent = req.get("User-Agent") || "";
+  const ipAddress = req.ip || req.connection.remoteAddress || "";
 
   console.log(`Attachment download: ${attachmentId}`);
 
-  // Find attachment record
-  const attachment = attachmentTracking.find(att => att.id === attachmentId && att.secureToken === token);
-  if (!attachment) {
-    return res.status(404).send('Attachment not found or invalid token');
-  }
-
-  // Record the download event
-  const downloadData = {
-    id: crypto.randomBytes(16).toString('hex'),
-    attachmentId,
-    recipientEmail: '', // Could be passed as query param if needed
-    userAgent,
-    ipAddress,
-    timestamp: new Date().toISOString()
-  };
-
-  attachmentDownloads.push(downloadData);
-
-  // Update email tracking record
-  const emailIndex = emailTracking.findIndex(email => email.id === attachment.emailId);
-  if (emailIndex !== -1) {
-    emailTracking[emailIndex].attachmentDownloads = (emailTracking[emailIndex].attachmentDownloads || 0) + 1;
-  }
-
-  saveData();
-
-  // Serve the file from persistent attachments directory
-  const filePath = path.join(ATTACHMENTS_DIR, attachment.trackedFileName);
-  if (fs.existsSync(filePath)) {
-    res.set({
-      'Content-Type': attachment.contentType || 'application/octet-stream',
-      'Content-Disposition': `attachment; filename="${attachment.originalFileName}"`
+  try {
+    const attachment = await attachmentTrackingCollection.findOne({
+      id: attachmentId,
+      secureToken: token,
     });
-    res.sendFile(filePath);
-  } else {
-    res.status(404).send('File not found');
+    if (!attachment) {
+      return res.status(404).send("Attachment not found or invalid token");
+    }
+
+    const downloadData = {
+      id: crypto.randomBytes(16).toString("hex"),
+      attachmentId,
+      recipientEmail,
+      userAgent,
+      ipAddress,
+      timestamp: nowIso(),
+      type: action,
+    };
+
+    await attachmentDownloadsCollection.insertOne(downloadData);
+
+    await ensureEmailDocument(attachment.emailId, { recipientEmail });
+
+    const updateFields =
+      action === "open"
+        ? { $inc: { attachmentOpens: 1 } }
+        : { $inc: { attachmentDownloads: 1 } };
+
+    await emailTrackingCollection.updateOne(
+      { id: attachment.emailId },
+      updateFields
+    );
+
+    const filePath = path.join(ATTACHMENTS_DIR, attachment.trackedFileName);
+    if (fs.existsSync(filePath)) {
+      res.set({
+        "Content-Type": attachment.contentType || "application/octet-stream",
+        "Content-Disposition": `attachment; filename="${attachment.originalFileName}"`,
+      });
+      return res.sendFile(filePath);
+    }
+
+    res.status(404).send("File not found");
+  } catch (error) {
+    console.error("Error recording attachment download:", error);
+    res.status(500).send("Server error");
   }
 });
 
 // Unsubscribe endpoint
-app.get('/track/unsubscribe/:emailId', (req, res) => {
+app.get("/track/unsubscribe/:emailId", (req, res) => {
   const { emailId } = req.params;
   const { r: recipientEmail } = req.query;
 
@@ -239,7 +340,7 @@ app.get('/track/unsubscribe/:emailId', (req, res) => {
       <p>Vous avez été désabonné avec succès de nos communications.</p>
       <div class="info">
         <p><strong>Email:</strong> ${recipientEmail}</p>
-        <p><strong>Date:</strong> ${new Date().toLocaleString('fr-FR')}</p>
+        <p><strong>Date:</strong> ${new Date().toLocaleString("fr-FR")}</p>
       </div>
       <p>Vous ne recevrez plus d'emails de notre part. Si vous souhaitez vous réabonner, vous pouvez nous contacter.</p>
     </body>
@@ -248,7 +349,7 @@ app.get('/track/unsubscribe/:emailId', (req, res) => {
 });
 
 // Privacy policy endpoint
-app.get('/privacy', (req, res) => {
+app.get("/privacy", (req, res) => {
   res.send(`
     <!DOCTYPE html>
     <html>
@@ -305,62 +406,128 @@ app.get('/privacy', (req, res) => {
 });
 
 // API endpoints for the Electron app to sync data
-app.get('/api/tracking-data', (req, res) => {
-  res.json({
-    emailTracking,
-    emailOpens,
-    emailClicks,
-    attachmentTracking,
-    attachmentDownloads
-  });
+app.get("/api/tracking-data", async (req, res) => {
+  try {
+    const [
+      emailTracking,
+      emailOpens,
+      emailClicks,
+      attachmentTracking,
+      attachmentDownloads,
+    ] = await Promise.all([
+      emailTrackingCollection.find().toArray(),
+      emailOpensCollection.find().toArray(),
+      emailClicksCollection.find().toArray(),
+      attachmentTrackingCollection.find().toArray(),
+      attachmentDownloadsCollection.find().toArray(),
+    ]);
+
+    res.json({
+      emailTracking,
+      emailOpens,
+      emailClicks,
+      attachmentTracking,
+      attachmentDownloads,
+    });
+  } catch (error) {
+    console.error("Error fetching tracking data:", error);
+    res
+      .status(500)
+      .json({ success: false, error: "Failed to fetch tracking data" });
+  }
 });
 
-app.post('/api/sync-tracking-data', (req, res) => {
-  const { emailTracking: newEmailTracking, emailOpens: newEmailOpens, emailClicks: newEmailClicks, attachmentTracking: newAttachmentTracking, attachmentDownloads: newAttachmentDownloads } = req.body;
-  
-  if (newEmailTracking) emailTracking = newEmailTracking;
-  if (newEmailOpens) emailOpens = newEmailOpens;
-  if (newEmailClicks) emailClicks = newEmailClicks;
-  if (newAttachmentTracking) attachmentTracking = newAttachmentTracking;
-  if (newAttachmentDownloads) attachmentDownloads = newAttachmentDownloads;
-  
-  saveData();
-  res.json({ success: true });
+app.post("/api/sync-tracking-data", async (req, res) => {
+  try {
+    const {
+      emailTracking: newEmailTracking,
+      emailOpens: newEmailOpens,
+      emailClicks: newEmailClicks,
+      attachmentTracking: newAttachmentTracking,
+      attachmentDownloads: newAttachmentDownloads,
+    } = req.body;
+
+    if (Array.isArray(newEmailTracking) && newEmailTracking.length) {
+      await Promise.all(
+        newEmailTracking.map((doc) => ensureEmailDocument(doc.id, doc))
+      );
+    }
+
+    if (Array.isArray(newEmailOpens) && newEmailOpens.length) {
+      await emailOpensCollection.insertMany(newEmailOpens);
+    }
+
+    if (Array.isArray(newEmailClicks) && newEmailClicks.length) {
+      await emailClicksCollection.insertMany(newEmailClicks);
+    }
+
+    if (Array.isArray(newAttachmentTracking) && newAttachmentTracking.length) {
+      await attachmentTrackingCollection
+        .insertMany(newAttachmentTracking, { ordered: false })
+        .catch(() => {});
+    }
+
+    if (
+      Array.isArray(newAttachmentDownloads) &&
+      newAttachmentDownloads.length
+    ) {
+      await attachmentDownloadsCollection.insertMany(newAttachmentDownloads);
+    }
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error("Error syncing tracking data:", error);
+    res
+      .status(500)
+      .json({ success: false, error: "Failed to sync tracking data" });
+  }
 });
 
 // Health check endpoint
-app.get('/health', (req, res) => {
-  res.json({ 
-    status: 'ok', 
+app.get("/health", (req, res) => {
+  res.json({
+    status: "ok",
     timestamp: new Date().toISOString(),
     data: {
       emails: emailTracking.length,
       opens: emailOpens.length,
       clicks: emailClicks.length,
       attachments: attachmentTracking.length,
-      downloads: attachmentDownloads.length
-    }
+      downloads: attachmentDownloads.length,
+    },
   });
 });
 
-// Start server
-app.listen(PORT, () => {
-  console.log(`Tracking server running on port ${PORT}`);
-  console.log(`Health check: http://localhost:${PORT}/health`);
-  console.log(`Privacy policy: http://localhost:${PORT}/privacy`);
-});
+// Start server (ensure DB connection first)
+const startServer = async () => {
+  try {
+    await connectToDatabase();
+    console.log("Connected to MongoDB");
+
+    app.listen(PORT, () => {
+      console.log(`Tracking server running on port ${PORT}`);
+      console.log(`Health check: http://localhost:${PORT}/health`);
+      console.log(`Privacy policy: http://localhost:${PORT}/privacy`);
+    });
+  } catch (error) {
+    console.error("Failed to start server:", error);
+    process.exit(1);
+  }
+};
+
+startServer();
 
 // Graceful shutdown
-process.on('SIGINT', () => {
-  console.log('\nShutting down tracking server...');
-  saveData();
-  process.exit(0);
-});
+const gracefulShutdown = async () => {
+  console.log("\nShutting down tracking server...");
+  try {
+    await client.close();
+  } catch (error) {
+    console.error("Error closing MongoDB client:", error);
+  } finally {
+    process.exit(0);
+  }
+};
 
-process.on('SIGTERM', () => {
-  console.log('\nShutting down tracking server...');
-  saveData();
-  process.exit(0);
-});
-
-
+process.on("SIGINT", gracefulShutdown);
+process.on("SIGTERM", gracefulShutdown);
