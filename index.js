@@ -89,6 +89,27 @@ app.get('/track/open/:emailId', (req, res) => {
   const userAgent = req.get('User-Agent') || '';
   const ipAddress = req.ip || req.connection.remoteAddress || '';
 
+  // Find the email tracking record to check when it was sent
+  const emailRecord = emailTracking.find(email => email.id === emailId);
+  if (emailRecord) {
+    const sentTime = new Date(emailRecord.sentAt);
+    const now = new Date();
+    const secondsSinceSent = (now - sentTime) / 1000;
+    
+    // Ignore opens that happen within 5 seconds of sending (likely preview/scanner)
+    if (secondsSinceSent < 5) {
+      console.log(`⚠️ Instant open ignored (${secondsSinceSent.toFixed(1)}s after sending) - likely preview/scanner`);
+      res.set({
+        'Content-Type': 'image/gif',
+        'Content-Length': transparentGif.length,
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        'Pragma': 'no-cache',
+        'Expires': '0'
+      });
+      return res.send(transparentGif);
+    }
+  }
+
   console.log(`Email opened: ${emailId} by ${recipientEmail}`);
 
   // Record the open event
@@ -130,6 +151,24 @@ app.get('/track/click/:emailId', (req, res) => {
   const userAgent = req.get('User-Agent') || '';
   const ipAddress = req.ip || req.connection.remoteAddress || '';
 
+  // Find the email tracking record to check when it was sent
+  const emailRecord = emailTracking.find(email => email.id === emailId);
+  if (emailRecord) {
+    const sentTime = new Date(emailRecord.sentAt);
+    const now = new Date();
+    const secondsSinceSent = (now - sentTime) / 1000;
+    
+    // Ignore clicks that happen within 5 seconds of sending (likely scanner)
+    if (secondsSinceSent < 5) {
+      console.log(`⚠️ Instant click ignored (${secondsSinceSent.toFixed(1)}s after sending) - likely scanner`);
+      if (url) {
+        return res.redirect(decodeURIComponent(url));
+      } else {
+        return res.status(400).send('Invalid URL');
+      }
+    }
+  }
+
   console.log(`Link clicked: ${url} in email ${emailId} by ${recipientEmail}`);
 
   // Record the click event
@@ -169,13 +208,37 @@ app.get('/track/attachment/:attachmentId', (req, res) => {
   const userAgent = req.get('User-Agent') || '';
   const ipAddress = req.ip || req.connection.remoteAddress || '';
 
-  console.log(`Attachment download: ${attachmentId}`);
-
   // Find attachment record
   const attachment = attachmentTracking.find(att => att.id === attachmentId && att.secureToken === token);
   if (!attachment) {
     return res.status(404).send('Attachment not found or invalid token');
   }
+
+  // Find the email tracking record to check when it was sent
+  const emailRecord = emailTracking.find(email => email.id === attachment.emailId);
+  if (emailRecord) {
+    const sentTime = new Date(emailRecord.sentAt);
+    const now = new Date();
+    const secondsSinceSent = (now - sentTime) / 1000;
+    
+    // Ignore downloads that happen within 5 seconds of sending (likely scanner)
+    if (secondsSinceSent < 5) {
+      console.log(`⚠️ Instant download ignored (${secondsSinceSent.toFixed(1)}s after sending) - likely scanner`);
+      // Serve the file but don't record the download
+      const filePath = path.join(ATTACHMENTS_DIR, attachment.trackedFileName);
+      if (fs.existsSync(filePath)) {
+        res.set({
+          'Content-Type': attachment.contentType || 'application/octet-stream',
+          'Content-Disposition': `attachment; filename="${attachment.originalFileName}"`
+        });
+        return res.sendFile(filePath);
+      } else {
+        return res.status(404).send('File not found');
+      }
+    }
+  }
+
+  console.log(`Attachment download: ${attachmentId}`);
 
   // Record the download event
   const downloadData = {
