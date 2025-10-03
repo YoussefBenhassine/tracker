@@ -110,7 +110,31 @@ app.get('/track/open/:emailId', async (req, res) => {
   const userAgent = req.get('User-Agent') || '';
   const ipAddress = req.ip || req.connection.remoteAddress || '';
 
-  console.log(`Email opened: ${emailId} by ${recipientEmail}`);
+  // Vérifications pour éviter les faux positifs
+  const suspiciousUserAgents = [
+    'bot', 'crawler', 'spider', 'scanner', 'checker', 'monitor',
+    'preview', 'prefetch', 'security', 'antivirus', 'firewall'
+  ];
+  
+  const isSuspicious = suspiciousUserAgents.some(term => 
+    userAgent.toLowerCase().includes(term)
+  );
+
+  // Ignorer les requêtes suspectes
+  if (isSuspicious) {
+    console.log(`Suspicious user agent detected, ignoring: ${userAgent}`);
+    res.set({
+      'Content-Type': 'image/gif',
+      'Content-Length': transparentGif.length,
+      'Cache-Control': 'no-cache, no-store, must-revalidate',
+      'Pragma': 'no-cache',
+      'Expires': '0'
+    });
+    res.send(transparentGif);
+    return;
+  }
+
+  console.log(`Email opened: ${emailId} by ${recipientEmail} (User-Agent: ${userAgent})`);
 
   const openData = {
     id: crypto.randomBytes(16).toString('hex'),
@@ -123,14 +147,26 @@ app.get('/track/open/:emailId', async (req, res) => {
 
   try {
     await ensureEmailDocument(emailId, { recipientEmail });
-    await emailOpensCollection.insertOne(openData);
-    await emailTrackingCollection.updateOne(
-      { id: emailId },
-      {
-        $inc: { openCount: 1 },
-        $set: { lastOpenedAt: openData.timestamp, recipientEmail }
-      }
-    );
+    
+    // Vérifier s'il y a déjà une ouverture récente (dans les 30 secondes)
+    const recentOpen = await emailOpensCollection.findOne({
+      emailId,
+      recipientEmail,
+      timestamp: { $gte: new Date(Date.now() - 30000).toISOString() }
+    });
+    
+    if (recentOpen) {
+      console.log(`Recent open detected for ${emailId} by ${recipientEmail}, skipping duplicate`);
+    } else {
+      await emailOpensCollection.insertOne(openData);
+      await emailTrackingCollection.updateOne(
+        { id: emailId },
+        {
+          $inc: { openCount: 1 },
+          $set: { lastOpenedAt: openData.timestamp, recipientEmail }
+        }
+      );
+    }
   } catch (error) {
     console.error('Error recording email open:', error);
   }
@@ -336,12 +372,16 @@ app.get('/privacy', (req, res) => {
 // API endpoints for the Electron app to sync data
 app.get('/api/tracking-data', async (req, res) => {
   try {
+    const { since } = req.query; // Optional: get only data since a certain timestamp
+    
+    const query = since ? { timestamp: { $gt: since } } : {};
+    
     const [emailTracking, emailOpens, emailClicks, attachmentTracking, attachmentDownloads] = await Promise.all([
       emailTrackingCollection.find().toArray(),
-      emailOpensCollection.find().toArray(),
-      emailClicksCollection.find().toArray(),
+      emailOpensCollection.find(query).toArray(),
+      emailClicksCollection.find(query).toArray(),
       attachmentTrackingCollection.find().toArray(),
-      attachmentDownloadsCollection.find().toArray()
+      attachmentDownloadsCollection.find(query).toArray()
     ]);
 
     res.json({
@@ -349,11 +389,49 @@ app.get('/api/tracking-data', async (req, res) => {
       emailOpens,
       emailClicks,
       attachmentTracking,
-      attachmentDownloads
+      attachmentDownloads,
+      serverTimestamp: nowIso()
     });
   } catch (error) {
     console.error('Error fetching tracking data:', error);
     res.status(500).json({ success: false, error: 'Failed to fetch tracking data' });
+  }
+});
+
+// Quick check endpoint for changes (lightweight)
+app.get('/api/tracking-status', async (req, res) => {
+  try {
+    const [emailCount, openCount, clickCount, attachmentCount, downloadCount] = await Promise.all([
+      emailTrackingCollection.countDocuments(),
+      emailOpensCollection.countDocuments(),
+      emailClicksCollection.countDocuments(),
+      attachmentTrackingCollection.countDocuments(),
+      attachmentDownloadsCollection.countDocuments()
+    ]);
+
+    // Get latest timestamps
+    const [latestOpen, latestClick] = await Promise.all([
+      emailOpensCollection.findOne({}, { sort: { timestamp: -1 }, projection: { timestamp: 1 } }),
+      emailClicksCollection.findOne({}, { sort: { timestamp: -1 }, projection: { timestamp: 1 } })
+    ]);
+
+    res.json({
+      counts: {
+        emails: emailCount,
+        opens: openCount,
+        clicks: clickCount,
+        attachments: attachmentCount,
+        downloads: downloadCount
+      },
+      latestActivity: {
+        lastOpen: latestOpen?.timestamp || null,
+        lastClick: latestClick?.timestamp || null
+      },
+      serverTimestamp: nowIso()
+    });
+  } catch (error) {
+    console.error('Error fetching tracking status:', error);
+    res.status(500).json({ success: false, error: 'Failed to fetch tracking status' });
   }
 });
 
