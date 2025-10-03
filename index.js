@@ -82,95 +82,12 @@ const saveData = () => {
 // Load data on startup
 loadData();
 
-// Helper function to detect bots and scanners
-const isBotOrScanner = (userAgent) => {
-  const botPatterns = [
-    /bot/i,
-    /crawler/i,
-    /spider/i,
-    /scan/i,
-    /check/i,
-    /monitor/i,
-    /preview/i,
-    /prefetch/i,
-    /proxy/i,
-    /security/i,
-    /antivirus/i,
-    /virus/i,
-    /safe/i,
-    /link.*check/i,
-    /url.*check/i,
-    /emailscan/i,
-    /mailscanner/i
-  ];
-  
-  return botPatterns.some(pattern => pattern.test(userAgent));
-};
-
 // Open tracking endpoint
 app.get('/track/open/:emailId', (req, res) => {
   const { emailId } = req.params;
   const { r: recipientEmail } = req.query;
   const userAgent = req.get('User-Agent') || '';
   const ipAddress = req.ip || req.connection.remoteAddress || '';
-
-  // Filter out bot/scanner requests to prevent false positives
-  if (isBotOrScanner(userAgent)) {
-    console.log(`⚠️ Bot/Scanner detected and ignored: ${userAgent}`);
-    // Return the pixel but don't record the open
-    res.set({
-      'Content-Type': 'image/gif',
-      'Content-Length': transparentGif.length,
-      'Cache-Control': 'no-cache, no-store, must-revalidate',
-      'Pragma': 'no-cache',
-      'Expires': '0'
-    });
-    return res.send(transparentGif);
-  }
-
-  // Find the email tracking record to check when it was sent
-  const emailRecord = emailTracking.find(email => email.id === emailId);
-  if (emailRecord) {
-    const sentTime = new Date(emailRecord.sentAt);
-    const now = new Date();
-    const secondsSinceSent = (now - sentTime) / 1000;
-    
-    // Ignore opens that happen within 10 seconds of sending (likely preview/scanner)
-    if (secondsSinceSent < 10) {
-      console.log(`⚠️ Instant open ignored (${secondsSinceSent.toFixed(1)}s after sending) - likely preview/scanner`);
-      res.set({
-        'Content-Type': 'image/gif',
-        'Content-Length': transparentGif.length,
-        'Cache-Control': 'no-cache, no-store, must-revalidate',
-        'Pragma': 'no-cache',
-        'Expires': '0'
-      });
-      return res.send(transparentGif);
-    }
-  }
-
-  // Check for rapid duplicates (within 30 seconds) to prevent bot reloads
-  // This allows legitimate re-opens after 30 seconds
-  const thirtySecondsAgo = new Date(Date.now() - 30 * 1000).toISOString();
-  const rapidDuplicate = emailOpens.find(open => 
-    open.emailId === emailId && 
-    open.recipientEmail === recipientEmail &&
-    open.timestamp > thirtySecondsAgo &&
-    open.ipAddress === ipAddress
-  );
-
-  if (rapidDuplicate) {
-    console.log(`⚠️ Rapid duplicate open ignored (within 30s): ${emailId} by ${recipientEmail}`);
-    // Return the pixel but don't record the rapid duplicate
-    res.set({
-      'Content-Type': 'image/gif',
-      'Content-Length': transparentGif.length,
-      'Cache-Control': 'no-cache, no-store, must-revalidate',
-      'Pragma': 'no-cache',
-      'Expires': '0'
-    });
-    return res.send(transparentGif);
-  }
 
   console.log(`Email opened: ${emailId} by ${recipientEmail}`);
 
@@ -213,56 +130,6 @@ app.get('/track/click/:emailId', (req, res) => {
   const userAgent = req.get('User-Agent') || '';
   const ipAddress = req.ip || req.connection.remoteAddress || '';
 
-  // Filter out bot/scanner requests to prevent false positives
-  if (isBotOrScanner(userAgent)) {
-    console.log(`⚠️ Bot/Scanner click detected and ignored: ${userAgent}`);
-    // Redirect to the URL but don't record the click
-    if (url) {
-      return res.redirect(decodeURIComponent(url));
-    } else {
-      return res.status(400).send('Invalid URL');
-    }
-  }
-
-  // Find the email tracking record to check when it was sent
-  const emailRecord = emailTracking.find(email => email.id === emailId);
-  if (emailRecord) {
-    const sentTime = new Date(emailRecord.sentAt);
-    const now = new Date();
-    const secondsSinceSent = (now - sentTime) / 1000;
-    
-    // Ignore clicks that happen within 5 seconds of sending (likely scanner)
-    if (secondsSinceSent < 5) {
-      console.log(`⚠️ Instant click ignored (${secondsSinceSent.toFixed(1)}s after sending) - likely scanner`);
-      if (url) {
-        return res.redirect(decodeURIComponent(url));
-      } else {
-        return res.status(400).send('Invalid URL');
-      }
-    }
-  }
-
-  // Check for rapid duplicates (within 10 seconds) to prevent bot reloads
-  // This allows legitimate re-clicks after 10 seconds
-  const tenSecondsAgo = new Date(Date.now() - 10 * 1000).toISOString();
-  const rapidDuplicate = emailClicks.find(click => 
-    click.emailId === emailId && 
-    click.url === url &&
-    click.recipientEmail === recipientEmail &&
-    click.timestamp > tenSecondsAgo &&
-    click.ipAddress === ipAddress
-  );
-
-  if (rapidDuplicate) {
-    console.log(`⚠️ Rapid duplicate click ignored (within 10s): ${url} by ${recipientEmail}`);
-    // Redirect to the URL but don't record the rapid duplicate
-    if (url) {
-      return res.redirect(decodeURIComponent(url));
-    } else {
-      return res.status(400).send('Invalid URL');
-    }
-  }
-
   console.log(`Link clicked: ${url} in email ${emailId} by ${recipientEmail}`);
 
   // Record the click event
@@ -302,81 +169,45 @@ app.get('/track/attachment/:attachmentId', (req, res) => {
   const userAgent = req.get('User-Agent') || '';
   const ipAddress = req.ip || req.connection.remoteAddress || '';
 
+  console.log(`Attachment download: ${attachmentId}`);
+
   // Find attachment record
   const attachment = attachmentTracking.find(att => att.id === attachmentId && att.secureToken === token);
   if (!attachment) {
     return res.status(404).send('Attachment not found or invalid token');
   }
 
-  // Serve the file first
+  // Record the download event
+  const downloadData = {
+    id: crypto.randomBytes(16).toString('hex'),
+    attachmentId,
+    recipientEmail: '', // Could be passed as query param if needed
+    userAgent,
+    ipAddress,
+    timestamp: new Date().toISOString()
+  };
+
+  attachmentDownloads.push(downloadData);
+
+  // Update email tracking record
+  const emailIndex = emailTracking.findIndex(email => email.id === attachment.emailId);
+  if (emailIndex !== -1) {
+    emailTracking[emailIndex].attachmentDownloads = (emailTracking[emailIndex].attachmentDownloads || 0) + 1;
+  }
+
+  saveData();
+
+  // Serve the file from persistent attachments directory
   const filePath = path.join(ATTACHMENTS_DIR, attachment.trackedFileName);
-  if (!fs.existsSync(filePath)) {
-    return res.status(404).send('File not found');
-  }
-
-  // Only record download if not a bot and not a recent duplicate
-  if (!isBotOrScanner(userAgent)) {
-    // Find the email tracking record to check when it was sent
-    let shouldIgnore = false;
-    const emailRecord = emailTracking.find(email => email.id === attachment.emailId);
-    if (emailRecord) {
-      const sentTime = new Date(emailRecord.sentAt);
-      const now = new Date();
-      const secondsSinceSent = (now - sentTime) / 1000;
-      
-      // Ignore downloads that happen within 5 seconds of sending (likely scanner)
-      if (secondsSinceSent < 5) {
-        console.log(`⚠️ Instant download ignored (${secondsSinceSent.toFixed(1)}s after sending) - likely scanner`);
-        shouldIgnore = true;
-      }
-    }
-
-    // Check for rapid duplicates (within 30 seconds) to prevent bot reloads
-    const thirtySecondsAgo = new Date(Date.now() - 30 * 1000).toISOString();
-    const rapidDuplicate = attachmentDownloads.find(download => 
-      download.attachmentId === attachmentId && 
-      download.timestamp > thirtySecondsAgo &&
-      download.ipAddress === ipAddress
-    );
-
-    if (rapidDuplicate) {
-      console.log(`⚠️ Rapid duplicate attachment download ignored (within 30s): ${attachmentId}`);
-      shouldIgnore = true;
-    }
-
-    if (!shouldIgnore) {
-      console.log(`Attachment download: ${attachmentId}`);
-
-      // Record the download event
-      const downloadData = {
-        id: crypto.randomBytes(16).toString('hex'),
-        attachmentId,
-        recipientEmail: '', // Could be passed as query param if needed
-        userAgent,
-        ipAddress,
-        timestamp: new Date().toISOString()
-      };
-
-      attachmentDownloads.push(downloadData);
-
-      // Update email tracking record
-      const emailIndex = emailTracking.findIndex(email => email.id === attachment.emailId);
-      if (emailIndex !== -1) {
-        emailTracking[emailIndex].attachmentDownloads = (emailTracking[emailIndex].attachmentDownloads || 0) + 1;
-      }
-
-      saveData();
-    }
+  if (fs.existsSync(filePath)) {
+    res.set({
+      'Content-Type': attachment.contentType || 'application/octet-stream',
+      'Content-Disposition': `attachment; filename="${attachment.originalFileName}"`
+    });
+    res.sendFile(filePath);
   } else {
-    console.log(`⚠️ Bot/Scanner attachment download detected and ignored: ${userAgent}`);
+    res.status(404).send('File not found');
   }
-
-  // Serve the file
-  res.set({
-    'Content-Type': attachment.contentType || 'application/octet-stream',
-    'Content-Disposition': `attachment; filename="${attachment.originalFileName}"`
-  });
-  res.sendFile(filePath);
 });
 
 // Unsubscribe endpoint
