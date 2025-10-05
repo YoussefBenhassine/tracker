@@ -187,6 +187,8 @@ app.get("/track/open/:emailId", async (req, res) => {
     userAgent,
     ipAddress,
     timestamp: nowIso(),
+    readingTime: null, // Will be updated when user closes email or after timeout
+    readingStartTime: nowIso(),
   };
 
   try {
@@ -211,6 +213,59 @@ app.get("/track/open/:emailId", async (req, res) => {
     Expires: "0",
   });
   res.send(transparentGif);
+});
+
+// Reading time tracking endpoint
+app.post("/track/reading-time/:emailId", async (req, res) => {
+  const { emailId } = req.params;
+  const { readingTime, recipientEmail } = req.body;
+  const userAgent = req.get("User-Agent") || "";
+  const ipAddress = req.ip || req.connection.remoteAddress || "";
+
+  console.log(`Reading time recorded: ${readingTime}ms for email ${emailId} by ${recipientEmail}`);
+
+  try {
+    // Update the most recent open record for this email and recipient
+    const updateResult = await emailOpensCollection.updateOne(
+      { 
+        emailId, 
+        recipientEmail,
+        readingTime: null // Only update records that don't have reading time yet
+      },
+      { 
+        $set: { 
+          readingTime: parseInt(readingTime),
+          readingEndTime: nowIso()
+        } 
+      },
+      { sort: { timestamp: -1 } } // Update the most recent open
+    );
+
+    if (updateResult.modifiedCount > 0) {
+      console.log(`✅ Reading time updated for email ${emailId}`);
+      
+      // Update email tracking summary with average reading time
+      const opens = await emailOpensCollection.find({ 
+        emailId, 
+        readingTime: { $ne: null } 
+      }).toArray();
+      
+      if (opens.length > 0) {
+        const totalReadingTime = opens.reduce((sum, open) => sum + (open.readingTime || 0), 0);
+        const averageReadingTime = Math.round(totalReadingTime / opens.length);
+        
+        await emailTrackingCollection.updateOne(
+          { id: emailId },
+          { $set: { averageReadingTime } }
+        );
+      }
+    }
+
+    res.json({ success: true, readingTime: parseInt(readingTime) });
+  } catch (error) {
+    console.error("Error recording reading time:", error);
+    res.status(500).json({ success: false, error: "Failed to record reading time" });
+  }
 });
 
 // Click tracking endpoint
