@@ -578,7 +578,35 @@ app.get("/auth/google/callback", async (req, res) => {
 
   if (error) {
     console.error("OAuth error:", error);
-    return res.redirect(`/calendar?error=${encodeURIComponent(error)}`);
+    return res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Authentication Error</title>
+        <style>
+          body { font-family: Arial, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background: #f5f5f5; }
+          .message { text-align: center; padding: 2rem; background: white; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+          .error { color: #dc2626; }
+        </style>
+      </head>
+      <body>
+        <div class="message">
+          <h2 class="error">Authentication Failed</h2>
+          <p>${error}</p>
+          <p>You can close this window and try again.</p>
+        </div>
+        <script>
+          // Try to communicate with Electron if possible
+          setTimeout(() => {
+            if (window.opener) {
+              window.opener.postMessage({ type: 'oauth-error', error: '${error}' }, '*');
+              window.close();
+            }
+          }, 3000);
+        </script>
+      </body>
+      </html>
+    `);
   }
 
   if (!code) {
@@ -619,11 +647,87 @@ app.get("/auth/google/callback", async (req, res) => {
       picture: userInfo.picture
     };
 
-    // Redirect to frontend calendar page with success
-    res.redirect(`/calendar?success=true&email=${encodeURIComponent(userInfo.email)}`);
+    // Send success page that will communicate with Electron
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Authentication Successful</title>
+        <style>
+          body { font-family: Arial, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background: #f5f5f5; }
+          .message { text-align: center; padding: 2rem; background: white; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+          .success { color: #16a34a; }
+          .spinner { border: 3px solid #f3f3f3; border-top: 3px solid #16a34a; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; margin: 20px auto; }
+          @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        </style>
+      </head>
+      <body>
+        <div class="message">
+          <h2 class="success">✓ Authentication Successful!</h2>
+          <p>Connected as ${userInfo.email}</p>
+          <div class="spinner"></div>
+          <p>Redirecting to calendar...</p>
+        </div>
+        <script>
+          // Store user data for the Electron app
+          const userData = {
+            email: '${userInfo.email}',
+            name: '${userInfo.name.replace(/'/g, "\\'")}',
+            picture: '${userInfo.picture}'
+          };
+          
+          // Save to localStorage so the Electron app can access it
+          localStorage.setItem('googleCalendarEmail', userData.email);
+          localStorage.setItem('googleCalendarUser', JSON.stringify(userData));
+          
+          // Try to communicate with opener window if it exists
+          if (window.opener) {
+            window.opener.postMessage({ 
+              type: 'oauth-success', 
+              email: userData.email,
+              user: userData
+            }, '*');
+            setTimeout(() => window.close(), 1000);
+          } else {
+            // If no opener, redirect after a short delay
+            setTimeout(() => {
+              window.location.href = 'electron://calendar?success=true&email=${encodeURIComponent(userInfo.email)}';
+            }, 2000);
+          }
+        </script>
+      </body>
+      </html>
+    `);
   } catch (error) {
     console.error("Error in OAuth callback:", error);
-    res.redirect(`/calendar?error=${encodeURIComponent('Authentication failed')}`);
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Authentication Error</title>
+        <style>
+          body { font-family: Arial, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background: #f5f5f5; }
+          .message { text-align: center; padding: 2rem; background: white; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+          .error { color: #dc2626; }
+        </style>
+      </head>
+      <body>
+        <div class="message">
+          <h2 class="error">Authentication Failed</h2>
+          <p>${error.message || 'An error occurred during authentication'}</p>
+          <p>You can close this window and try again.</p>
+        </div>
+        <script>
+          setTimeout(() => {
+            if (window.opener) {
+              window.opener.postMessage({ type: 'oauth-error', error: '${error.message || 'Authentication failed'}' }, '*');
+              window.close();
+            }
+          }, 3000);
+        </script>
+      </body>
+      </html>
+    `);
   }
 });
 
