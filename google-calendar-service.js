@@ -134,6 +134,7 @@ const createCalendarEvent = async (accessToken, refreshToken, eventData) => {
       dateTime: eventData.endTime || eventData.end?.dateTime,
       timeZone: eventData.timeZone || 'UTC',
     },
+    location: eventData.location || '',
     attendees: eventData.attendees || [],
     reminders: {
       useDefault: eventData.useDefaultReminders !== false,
@@ -141,40 +142,98 @@ const createCalendarEvent = async (accessToken, refreshToken, eventData) => {
     }
   };
 
+  // Add Google Meet conference if requested
+  if (eventData.conferenceData) {
+    event.conferenceData = eventData.conferenceData;
+  }
+
+  console.log('Creating event with data:', JSON.stringify(event, null, 2));
+
   try {
-    const response = await calendar.events.insert({
+    const insertOptions = {
       calendarId: 'primary',
       resource: event
-    });
+    };
 
+    // Request conference creation if conferenceData is provided
+    if (eventData.conferenceData) {
+      insertOptions.conferenceDataVersion = 1;
+    }
+
+    // Send invitations to all attendees if there are any attendees or if conference is requested
+    if (eventData.attendees?.length > 0 || eventData.conferenceData) {
+      insertOptions.sendUpdates = 'all';
+    }
+
+    const response = await calendar.events.insert(insertOptions);
+    
+    // Log the conference details if Meet link was created
+    if (response.data.conferenceData) {
+      console.log('Google Meet link created:', response.data.conferenceData.entryPoints?.[0]?.uri);
+    }
+
+    console.log('Event created successfully:', response.data.id);
+    
+    // Extract conference link if available
+    const meetLink = response.data.conferenceData?.entryPoints?.[0]?.uri;
+    
     return {
       success: true,
       event: response.data,
-      accessToken: oauth2Client.credentials.access_token
+      accessToken: oauth2Client.credentials.access_token,
+      meetLink: meetLink,
+      invitationsSent: eventData.attendees?.length > 0
     };
   } catch (error) {
+    console.error('Error creating event:', error.message, error.code);
+    if (error.response?.data) {
+      console.error('Google API error details:', error.response.data);
+    }
+    
     if (error.code === 401) {
       // Token expired, try to refresh
+      console.log('Token expired, attempting to refresh...');
       try {
         const newCredentials = await refreshAccessToken(refreshToken);
         oauth2Client.setCredentials(newCredentials);
         
-        const response = await calendar.events.insert({
+        const insertOptions = {
           calendarId: 'primary',
           resource: event
-        });
+        };
 
+        if (eventData.conferenceData) {
+          insertOptions.conferenceDataVersion = 1;
+        }
+
+        if (eventData.attendees?.length > 0 || eventData.conferenceData) {
+          insertOptions.sendUpdates = 'all';
+        }
+        
+        const response = await calendar.events.insert(insertOptions);
+        
+        if (response.data.conferenceData) {
+          console.log('Google Meet link created after token refresh:', response.data.conferenceData.entryPoints?.[0]?.uri);
+        }
+
+        console.log('Event created successfully after token refresh:', response.data.id);
+        
+        const meetLink = response.data.conferenceData?.entryPoints?.[0]?.uri;
+        
         return {
           success: true,
           event: response.data,
           accessToken: newCredentials.access_token,
-          refreshToken: newCredentials.refresh_token || refreshToken
+          refreshToken: newCredentials.refresh_token || refreshToken,
+          meetLink: meetLink,
+          invitationsSent: eventData.attendees?.length > 0
         };
       } catch (refreshError) {
-        throw new Error('Failed to refresh token');
+        console.error('Failed to refresh token:', refreshError);
+        throw new Error('Failed to refresh token: ' + refreshError.message);
       }
     }
-    throw error;
+    throw new Error(`Failed to create event: ${error.message}`);
   }
 };
 

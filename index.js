@@ -842,12 +842,14 @@ app.get("/api/calendar/events", async (req, res) => {
 app.post("/api/calendar/events", async (req, res) => {
   try {
     const { email, userId, eventData } = req.body;
+    console.log('Creating event for:', email || userId, 'Event data:', eventData);
 
     if (!email && !userId) {
       return res.status(400).json({ error: "Email or userId required" });
     }
 
     if (!eventData || !eventData.title || !eventData.startTime || !eventData.endTime) {
+      console.error('Incomplete event data:', eventData);
       return res.status(400).json({ error: "Event data incomplete (title, startTime, endTime required)" });
     }
 
@@ -855,9 +857,11 @@ app.post("/api/calendar/events", async (req, res) => {
     const user = await googleUsersCollection.findOne(query);
 
     if (!user) {
+      console.error('User not found:', query);
       return res.status(404).json({ error: "User not authenticated" });
     }
 
+    console.log('Found user:', user.email, 'Creating event...');
     const result = await calendarService.createCalendarEvent(
       user.accessToken,
       user.refreshToken,
@@ -880,7 +884,9 @@ app.post("/api/calendar/events", async (req, res) => {
 
     res.json({
       success: true,
-      event: result.event
+      event: result.event,
+      meetLink: result.meetLink,
+      invitationsSent: result.invitationsSent
     });
   } catch (error) {
     console.error("Error creating calendar event:", error);
