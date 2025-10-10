@@ -12,6 +12,20 @@ const PORT = process.env.PORT || 3001;
 // Trust reverse proxy (e.g., Render) to get correct client IPs
 app.set("trust proxy", true);
 
+// CORS middleware for Electron app
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.header('Access-Control-Allow-Credentials', 'true');
+  
+  // Handle preflight requests
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(200);
+  }
+  next();
+});
+
 // Middleware
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -666,34 +680,48 @@ app.get("/auth/google/callback", async (req, res) => {
           <h2 class="success">✓ Authentication Successful!</h2>
           <p>Connected as ${userInfo.email}</p>
           <div class="spinner"></div>
-          <p>Redirecting to calendar...</p>
+          <p id="status">Closing window...</p>
         </div>
         <script>
-          // Store user data for the Electron app
+          // Store user data
           const userData = {
             email: '${userInfo.email}',
             name: '${userInfo.name.replace(/'/g, "\\'")}',
             picture: '${userInfo.picture}'
           };
           
-          // Save to localStorage so the Electron app can access it
-          localStorage.setItem('googleCalendarEmail', userData.email);
-          localStorage.setItem('googleCalendarUser', JSON.stringify(userData));
-          
-          // Try to communicate with opener window if it exists
-          if (window.opener) {
-            window.opener.postMessage({ 
-              type: 'oauth-success', 
-              email: userData.email,
-              user: userData
-            }, '*');
-            setTimeout(() => window.close(), 1000);
-          } else {
-            // If no opener, redirect after a short delay
-            setTimeout(() => {
-              window.location.href = 'electron://calendar?success=true&email=${encodeURIComponent(userInfo.email)}';
-            }, 2000);
+          // Try to communicate with opener window
+          let messageSent = false;
+          try {
+            if (window.opener && !window.opener.closed) {
+              window.opener.postMessage({ 
+                type: 'oauth-success', 
+                email: userData.email,
+                user: userData
+              }, '*');
+              messageSent = true;
+              document.getElementById('status').textContent = 'Success! Closing window...';
+            }
+          } catch (e) {
+            console.log('Could not send message to opener:', e);
           }
+          
+          // Store in localStorage as fallback
+          try {
+            localStorage.setItem('googleCalendarEmail', userData.email);
+            localStorage.setItem('googleCalendarUser', JSON.stringify(userData));
+          } catch (e) {
+            console.log('Could not save to localStorage:', e);
+          }
+          
+          // Close window after a short delay
+          setTimeout(() => {
+            try {
+              window.close();
+            } catch (e) {
+              document.getElementById('status').textContent = 'You can close this window now.';
+            }
+          }, 2000);
         </script>
       </body>
       </html>
