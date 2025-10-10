@@ -4,6 +4,8 @@ const path = require("path");
 const fs = require("fs");
 const crypto = require("crypto");
 const { MongoClient } = require("mongodb");
+const session = require("express-session");
+const calendarService = require("./google-calendar-service");
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -13,6 +15,17 @@ app.set("trust proxy", true);
 // Middleware
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+
+// Session middleware for OAuth
+app.use(session({
+  secret: process.env.SESSION_SECRET || crypto.randomBytes(32).toString('hex'),
+  resave: false,
+  saveUninitialized: false,
+  cookie: { 
+    secure: process.env.NODE_ENV === 'production',
+    maxAge: 24 * 60 * 60 * 1000 // 24 hours
+  }
+}));
 
 const MONGO_URI = process.env.MONGO_URI;
 if (!MONGO_URI) {
@@ -43,6 +56,7 @@ let emailOpensCollection;
 let emailClicksCollection;
 let attachmentTrackingCollection;
 let attachmentDownloadsCollection;
+let googleUsersCollection;
 
 async function connectToDatabase() {
   await client.connect();
@@ -53,6 +67,7 @@ async function connectToDatabase() {
   emailClicksCollection = db.collection("email_clicks");
   attachmentTrackingCollection = db.collection("attachment_tracking");
   attachmentDownloadsCollection = db.collection("attachment_downloads");
+  googleUsersCollection = db.collection("google_users");
 
   await Promise.all([
     emailTrackingCollection.createIndex({ id: 1 }, { unique: true }),
@@ -61,6 +76,8 @@ async function connectToDatabase() {
     attachmentTrackingCollection.createIndex({ id: 1 }, { unique: true }),
     attachmentTrackingCollection.createIndex({ emailId: 1 }),
     attachmentDownloadsCollection.createIndex({ attachmentId: 1 }),
+    googleUsersCollection.createIndex({ email: 1 }, { unique: true }),
+    googleUsersCollection.createIndex({ userId: 1 }),
   ]);
 }
 
@@ -480,6 +497,324 @@ app.post("/api/sync-tracking-data", async (req, res) => {
     res
       .status(500)
       .json({ success: false, error: "Failed to sync tracking data" });
+  }
+});
+
+// ===== Google Calendar OAuth & API Routes =====
+
+// Google OAuth Login - Redirect to Google
+app.get("/auth/google", (req, res) => {
+  try {
+    const { userId } = req.query; // Optional: pass userId from frontend to track which user is authenticating
+    if (userId) {
+      req.session.userId = userId;
+    }
+    const authUrl = calendarService.getAuthUrl();
+    res.redirect(authUrl);
+  } catch (error) {
+    console.error("Error generating auth URL:", error);
+    res.status(500).json({ error: "Failed to generate auth URL" });
+  }
+});
+
+// Google OAuth Callback
+app.get("/auth/google/callback", async (req, res) => {
+  const { code, error } = req.query;
+
+  if (error) {
+    console.error("OAuth error:", error);
+    return res.redirect(`/calendar?error=${encodeURIComponent(error)}`);
+  }
+
+  if (!code) {
+    return res.status(400).send("Authorization code missing");
+  }
+
+  try {
+    // Exchange code for tokens
+    const tokens = await calendarService.getTokensFromCode(code);
+    
+    // Get user info from Google
+    const userInfo = await calendarService.getUserInfo(tokens.access_token);
+
+    // Store user data in database
+    const userData = {
+      userId: req.session.userId || crypto.randomBytes(16).toString('hex'),
+      email: userInfo.email,
+      name: userInfo.name,
+      picture: userInfo.picture,
+      accessToken: tokens.access_token,
+      refreshToken: tokens.refresh_token,
+      expiryDate: tokens.expiry_date,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+
+    await googleUsersCollection.updateOne(
+      { email: userInfo.email },
+      { $set: userData },
+      { upsert: true }
+    );
+
+    // Store user session
+    req.session.googleUser = {
+      userId: userData.userId,
+      email: userInfo.email,
+      name: userInfo.name,
+      picture: userInfo.picture
+    };
+
+    // Redirect to frontend calendar page with success
+    res.redirect(`/calendar?success=true&email=${encodeURIComponent(userInfo.email)}`);
+  } catch (error) {
+    console.error("Error in OAuth callback:", error);
+    res.redirect(`/calendar?error=${encodeURIComponent('Authentication failed')}`);
+  }
+});
+
+// Get current user info
+app.get("/api/calendar/user", async (req, res) => {
+  try {
+    const { email, userId } = req.query;
+    
+    if (!email && !userId) {
+      return res.status(400).json({ error: "Email or userId required" });
+    }
+
+    const query = email ? { email } : { userId };
+    const user = await googleUsersCollection.findOne(query);
+
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    // Return user info without sensitive tokens
+    res.json({
+      userId: user.userId,
+      email: user.email,
+      name: user.name,
+      picture: user.picture,
+      isAuthenticated: true
+    });
+  } catch (error) {
+    console.error("Error fetching user:", error);
+    res.status(500).json({ error: "Failed to fetch user" });
+  }
+});
+
+// Get Calendar Events
+app.get("/api/calendar/events", async (req, res) => {
+  try {
+    const { email, userId, timeMin, maxResults } = req.query;
+
+    if (!email && !userId) {
+      return res.status(400).json({ error: "Email or userId required" });
+    }
+
+    const query = email ? { email } : { userId };
+    const user = await googleUsersCollection.findOne(query);
+
+    if (!user) {
+      return res.status(404).json({ error: "User not authenticated" });
+    }
+
+    const result = await calendarService.getCalendarEvents(
+      user.accessToken,
+      user.refreshToken,
+      {
+        timeMin,
+        maxResults: maxResults ? parseInt(maxResults) : 50
+      }
+    );
+
+    // Update access token if it was refreshed
+    if (result.accessToken !== user.accessToken) {
+      await googleUsersCollection.updateOne(
+        { email: user.email },
+        { 
+          $set: { 
+            accessToken: result.accessToken,
+            refreshToken: result.refreshToken || user.refreshToken,
+            updatedAt: new Date().toISOString()
+          } 
+        }
+      );
+    }
+
+    res.json({
+      success: true,
+      events: result.events
+    });
+  } catch (error) {
+    console.error("Error fetching calendar events:", error);
+    res.status(500).json({ error: error.message || "Failed to fetch calendar events" });
+  }
+});
+
+// Create Calendar Event
+app.post("/api/calendar/events", async (req, res) => {
+  try {
+    const { email, userId, eventData } = req.body;
+
+    if (!email && !userId) {
+      return res.status(400).json({ error: "Email or userId required" });
+    }
+
+    if (!eventData || !eventData.title || !eventData.startTime || !eventData.endTime) {
+      return res.status(400).json({ error: "Event data incomplete (title, startTime, endTime required)" });
+    }
+
+    const query = email ? { email } : { userId };
+    const user = await googleUsersCollection.findOne(query);
+
+    if (!user) {
+      return res.status(404).json({ error: "User not authenticated" });
+    }
+
+    const result = await calendarService.createCalendarEvent(
+      user.accessToken,
+      user.refreshToken,
+      eventData
+    );
+
+    // Update access token if it was refreshed
+    if (result.accessToken !== user.accessToken) {
+      await googleUsersCollection.updateOne(
+        { email: user.email },
+        { 
+          $set: { 
+            accessToken: result.accessToken,
+            refreshToken: result.refreshToken || user.refreshToken,
+            updatedAt: new Date().toISOString()
+          } 
+        }
+      );
+    }
+
+    res.json({
+      success: true,
+      event: result.event
+    });
+  } catch (error) {
+    console.error("Error creating calendar event:", error);
+    res.status(500).json({ error: error.message || "Failed to create calendar event" });
+  }
+});
+
+// Update Calendar Event
+app.patch("/api/calendar/events/:eventId", async (req, res) => {
+  try {
+    const { eventId } = req.params;
+    const { email, userId, eventData } = req.body;
+
+    if (!email && !userId) {
+      return res.status(400).json({ error: "Email or userId required" });
+    }
+
+    const query = email ? { email } : { userId };
+    const user = await googleUsersCollection.findOne(query);
+
+    if (!user) {
+      return res.status(404).json({ error: "User not authenticated" });
+    }
+
+    const result = await calendarService.updateCalendarEvent(
+      user.accessToken,
+      user.refreshToken,
+      eventId,
+      eventData
+    );
+
+    // Update access token if it was refreshed
+    if (result.accessToken !== user.accessToken) {
+      await googleUsersCollection.updateOne(
+        { email: user.email },
+        { 
+          $set: { 
+            accessToken: result.accessToken,
+            refreshToken: result.refreshToken || user.refreshToken,
+            updatedAt: new Date().toISOString()
+          } 
+        }
+      );
+    }
+
+    res.json({
+      success: true,
+      event: result.event
+    });
+  } catch (error) {
+    console.error("Error updating calendar event:", error);
+    res.status(500).json({ error: error.message || "Failed to update calendar event" });
+  }
+});
+
+// Delete Calendar Event
+app.delete("/api/calendar/events/:eventId", async (req, res) => {
+  try {
+    const { eventId } = req.params;
+    const { email, userId } = req.query;
+
+    if (!email && !userId) {
+      return res.status(400).json({ error: "Email or userId required" });
+    }
+
+    const query = email ? { email } : { userId };
+    const user = await googleUsersCollection.findOne(query);
+
+    if (!user) {
+      return res.status(404).json({ error: "User not authenticated" });
+    }
+
+    const result = await calendarService.deleteCalendarEvent(
+      user.accessToken,
+      user.refreshToken,
+      eventId
+    );
+
+    // Update access token if it was refreshed
+    if (result.accessToken !== user.accessToken) {
+      await googleUsersCollection.updateOne(
+        { email: user.email },
+        { 
+          $set: { 
+            accessToken: result.accessToken,
+            refreshToken: result.refreshToken || user.refreshToken,
+            updatedAt: new Date().toISOString()
+          } 
+        }
+      );
+    }
+
+    res.json({
+      success: true,
+      message: "Event deleted successfully"
+    });
+  } catch (error) {
+    console.error("Error deleting calendar event:", error);
+    res.status(500).json({ error: error.message || "Failed to delete calendar event" });
+  }
+});
+
+// Logout/Disconnect Google Account
+app.post("/api/calendar/disconnect", async (req, res) => {
+  try {
+    const { email, userId } = req.body;
+
+    if (!email && !userId) {
+      return res.status(400).json({ error: "Email or userId required" });
+    }
+
+    const query = email ? { email } : { userId };
+    await googleUsersCollection.deleteOne(query);
+
+    res.json({
+      success: true,
+      message: "Google account disconnected successfully"
+    });
+  } catch (error) {
+    console.error("Error disconnecting account:", error);
+    res.status(500).json({ error: "Failed to disconnect account" });
   }
 });
 
