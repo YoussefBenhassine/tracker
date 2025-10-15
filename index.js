@@ -107,7 +107,7 @@ const nowIso = () => new Date().toISOString();
 const ensureEmailDocument = async (emailId, defaults = {}) => {
   const baseDefaults = {
     id: emailId,
-    sentAt: nowIso(),
+    sentAt: defaults.sentAt || nowIso(),
     status: "sent",
     openCount: 0,
     clickCount: 0,
@@ -173,13 +173,13 @@ app.get("/track/open/:emailId", async (req, res) => {
   // Additional validation: Check if email was sent recently (within last 30 seconds)
   try {
     const emailDoc = await emailTrackingCollection.findOne({ id: emailId });
-    if (emailDoc) {
+    if (emailDoc && emailDoc.sentAt) {
       const sentTime = new Date(emailDoc.sentAt);
       const now = new Date();
       const timeDiff = now - sentTime;
       
       // If email was sent less than 30 seconds ago, it's likely a false open
-      if (timeDiff < 5000) { // 30 seconds
+      if (timeDiff < 30000) { // 30 seconds
         console.log(`Skipping immediate open tracking: ${emailId} - Email sent ${timeDiff}ms ago`);
         res.set({
           "Content-Type": "image/gif",
@@ -190,6 +190,17 @@ app.get("/track/open/:emailId", async (req, res) => {
         });
         return res.send(transparentGif);
       }
+    } else if (emailDoc && !emailDoc.sentAt) {
+      // If email exists but has no sentAt timestamp, it's still being processed
+      console.log(`Skipping open tracking: ${emailId} - Email not yet sent (no sentAt timestamp)`);
+      res.set({
+        "Content-Type": "image/gif",
+        "Content-Length": transparentGif.length,
+        "Cache-Control": "no-cache, no-store, must-revalidate",
+        Pragma: "no-cache",
+        Expires: "0",
+      });
+      return res.send(transparentGif);
     }
   } catch (error) {
     console.error("Error checking email send time:", error);
