@@ -92,6 +92,8 @@ async function connectToDatabase() {
     attachmentDownloadsCollection.createIndex({ attachmentId: 1 }),
     googleUsersCollection.createIndex({ email: 1 }, { unique: true }),
     googleUsersCollection.createIndex({ userId: 1 }),
+    googleUsersCollection.createIndex({ machineId: 1 }),
+    googleUsersCollection.createIndex({ email: 1, machineId: 1 }, { unique: true }),
   ]);
 }
 
@@ -574,9 +576,12 @@ app.post("/api/sync-tracking-data", async (req, res) => {
 // Google OAuth Login - Redirect to Google
 app.get("/auth/google", (req, res) => {
   try {
-    const { userId } = req.query; // Optional: pass userId from frontend to track which user is authenticating
+    const { userId, machineId } = req.query; // Optional: pass userId and machineId from frontend to track which user is authenticating
     if (userId) {
       req.session.userId = userId;
+    }
+    if (machineId) {
+      req.session.machineId = machineId;
     }
     const authUrl = calendarService.getAuthUrl();
     res.redirect(authUrl);
@@ -596,18 +601,82 @@ app.get("/auth/google/callback", async (req, res) => {
       <!DOCTYPE html>
       <html>
       <head>
-        <title>Authentication Error</title>
+        <title>Altara - Authentication Error</title>
         <style>
-          body { font-family: Arial, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background: #f5f5f5; }
-          .message { text-align: center; padding: 2rem; background: white; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-          .error { color: #dc2626; }
+          body { 
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; 
+            display: flex; 
+            justify-content: center; 
+            align-items: center; 
+            height: 100vh; 
+            margin: 0; 
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            overflow: hidden;
+          }
+          .container {
+            text-align: center; 
+            padding: 3rem; 
+            background: white; 
+            border-radius: 16px; 
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+            max-width: 400px;
+            width: 90%;
+          }
+          .logo {
+            width: 80px;
+            height: 80px;
+            margin: 0 auto 2rem;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border-radius: 20px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 2rem;
+            font-weight: bold;
+            color: white;
+            box-shadow: 0 8px 20px rgba(102, 126, 234, 0.3);
+          }
+          .error { 
+            color: #dc2626; 
+            font-size: 1.5rem;
+            margin-bottom: 1rem;
+            font-weight: 600;
+          }
+          .error-icon {
+            font-size: 3rem;
+            margin-bottom: 1rem;
+            color: #dc2626;
+          }
+          p {
+            color: #6b7280;
+            line-height: 1.6;
+            margin: 0.5rem 0;
+          }
+          .close-btn {
+            background: #dc2626;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 500;
+            margin-top: 1rem;
+            transition: all 0.2s;
+          }
+          .close-btn:hover {
+            background: #b91c1c;
+            transform: translateY(-1px);
+          }
         </style>
       </head>
       <body>
-        <div class="message">
+        <div class="container">
+          <div class="logo">A</div>
+          <div class="error-icon">⚠️</div>
           <h2 class="error">Authentication Failed</h2>
           <p>${error}</p>
           <p>You can close this window and try again.</p>
+          <button class="close-btn" onclick="window.close()">Close Window</button>
         </div>
         <script>
           // Try to communicate with Electron if possible
@@ -643,6 +712,7 @@ app.get("/auth/google/callback", async (req, res) => {
       accessToken: tokens.access_token,
       refreshToken: tokens.refresh_token,
       expiryDate: tokens.expiry_date,
+      machineId: req.session.machineId || req.query.machineId || null,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
     };
@@ -666,21 +736,103 @@ app.get("/auth/google/callback", async (req, res) => {
       <!DOCTYPE html>
       <html>
       <head>
-        <title>Authentication Successful</title>
+        <title>Altara - Authentication Successful</title>
         <style>
-          body { font-family: Arial, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background: #f5f5f5; }
-          .message { text-align: center; padding: 2rem; background: white; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-          .success { color: #16a34a; }
-          .spinner { border: 3px solid #f3f3f3; border-top: 3px solid #16a34a; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; margin: 20px auto; }
-          @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+          body { 
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; 
+            display: flex; 
+            justify-content: center; 
+            align-items: center; 
+            height: 100vh; 
+            margin: 0; 
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            overflow: hidden;
+          }
+          .container {
+            text-align: center; 
+            padding: 3rem; 
+            background: white; 
+            border-radius: 16px; 
+            box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+            max-width: 400px;
+            width: 90%;
+          }
+          .logo {
+            width: 80px;
+            height: 80px;
+            margin: 0 auto 2rem;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border-radius: 20px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 2rem;
+            font-weight: bold;
+            color: white;
+            box-shadow: 0 8px 20px rgba(102, 126, 234, 0.3);
+          }
+          .success { 
+            color: #16a34a; 
+            font-size: 1.5rem;
+            margin-bottom: 1rem;
+            font-weight: 600;
+          }
+          .success-icon {
+            font-size: 3rem;
+            margin-bottom: 1rem;
+            color: #16a34a;
+          }
+          .user-info {
+            background: #f8fafc;
+            padding: 1rem;
+            border-radius: 8px;
+            margin: 1rem 0;
+            border-left: 4px solid #16a34a;
+          }
+          .user-email {
+            font-weight: 600;
+            color: #1f2937;
+            margin-bottom: 0.5rem;
+          }
+          .user-name {
+            color: #6b7280;
+            font-size: 0.9rem;
+          }
+          .spinner { 
+            border: 3px solid #f3f3f3; 
+            border-top: 3px solid #16a34a; 
+            border-radius: 50%; 
+            width: 40px; 
+            height: 40px; 
+            animation: spin 1s linear infinite; 
+            margin: 20px auto; 
+          }
+          @keyframes spin { 
+            0% { transform: rotate(0deg); } 
+            100% { transform: rotate(360deg); } 
+          }
+          p {
+            color: #6b7280;
+            line-height: 1.6;
+            margin: 0.5rem 0;
+          }
+          .status {
+            font-weight: 500;
+            color: #16a34a;
+          }
         </style>
       </head>
       <body>
-        <div class="message">
-          <h2 class="success">✓ Authentication Successful!</h2>
-          <p>Connected as ${userInfo.email}</p>
+        <div class="container">
+          <div class="logo">A</div>
+          <div class="success-icon">✅</div>
+          <h2 class="success">Authentication Successful!</h2>
+          <div class="user-info">
+            <div class="user-email">${userInfo.email}</div>
+            ${userInfo.name ? `<div class="user-name">${userInfo.name}</div>` : ''}
+          </div>
           <div class="spinner"></div>
-          <p id="status">Closing window...</p>
+          <p class="status" id="status">Connecting to Altara...</p>
         </div>
         <script>
           // Store user data
@@ -762,13 +914,18 @@ app.get("/auth/google/callback", async (req, res) => {
 // Get current user info
 app.get("/api/calendar/user", async (req, res) => {
   try {
-    const { email, userId } = req.query;
+    const { email, userId, machineId } = req.query;
     
     if (!email && !userId) {
       return res.status(400).json({ error: "Email or userId required" });
     }
 
-    const query = email ? { email } : { userId };
+    // Build query with machineId filter if provided
+    let query = email ? { email } : { userId };
+    if (machineId) {
+      query.machineId = machineId;
+    }
+    
     const user = await googleUsersCollection.findOne(query);
 
     if (!user) {
@@ -792,13 +949,18 @@ app.get("/api/calendar/user", async (req, res) => {
 // Get Calendar Events
 app.get("/api/calendar/events", async (req, res) => {
   try {
-    const { email, userId, timeMin, maxResults } = req.query;
+    const { email, userId, machineId, timeMin, maxResults } = req.query;
 
     if (!email && !userId) {
       return res.status(400).json({ error: "Email or userId required" });
     }
 
-    const query = email ? { email } : { userId };
+    // Build query with machineId filter if provided
+    let query = email ? { email } : { userId };
+    if (machineId) {
+      query.machineId = machineId;
+    }
+    
     const user = await googleUsersCollection.findOne(query);
 
     if (!user) {
@@ -817,7 +979,7 @@ app.get("/api/calendar/events", async (req, res) => {
     // Update access token if it was refreshed
     if (result.accessToken !== user.accessToken) {
       await googleUsersCollection.updateOne(
-        { email: user.email },
+        { email: user.email, machineId: user.machineId },
         { 
           $set: { 
             accessToken: result.accessToken,
@@ -841,8 +1003,8 @@ app.get("/api/calendar/events", async (req, res) => {
 // Create Calendar Event
 app.post("/api/calendar/events", async (req, res) => {
   try {
-    const { email, userId, eventData } = req.body;
-    console.log('Creating event for:', email || userId, 'Event data:', eventData);
+    const { email, userId, machineId, eventData } = req.body;
+    console.log('Creating event for:', email || userId, 'MachineId:', machineId, 'Event data:', eventData);
 
     if (!email && !userId) {
       return res.status(400).json({ error: "Email or userId required" });
@@ -853,7 +1015,12 @@ app.post("/api/calendar/events", async (req, res) => {
       return res.status(400).json({ error: "Event data incomplete (title, startTime, endTime required)" });
     }
 
-    const query = email ? { email } : { userId };
+    // Build query with machineId filter if provided
+    let query = email ? { email } : { userId };
+    if (machineId) {
+      query.machineId = machineId;
+    }
+    
     const user = await googleUsersCollection.findOne(query);
 
     if (!user) {
@@ -871,7 +1038,7 @@ app.post("/api/calendar/events", async (req, res) => {
     // Update access token if it was refreshed
     if (result.accessToken !== user.accessToken) {
       await googleUsersCollection.updateOne(
-        { email: user.email },
+        { email: user.email, machineId: user.machineId },
         { 
           $set: { 
             accessToken: result.accessToken,
@@ -992,13 +1159,18 @@ app.delete("/api/calendar/events/:eventId", async (req, res) => {
 // Logout/Disconnect Google Account
 app.post("/api/calendar/disconnect", async (req, res) => {
   try {
-    const { email, userId } = req.body;
+    const { email, userId, machineId } = req.body;
 
     if (!email && !userId) {
       return res.status(400).json({ error: "Email or userId required" });
     }
 
-    const query = email ? { email } : { userId };
+    // Build query with machineId filter if provided
+    let query = email ? { email } : { userId };
+    if (machineId) {
+      query.machineId = machineId;
+    }
+    
     await googleUsersCollection.deleteOne(query);
 
     res.json({
