@@ -213,6 +213,17 @@ app.get("/track/open/:emailId", async (req, res) => {
 
   console.log(`Email opened: ${emailId} by ${recipientEmail} - User-Agent: ${userAgent}, IP: ${ipAddress}`);
 
+  // Get userId from email tracking document
+  let userId = null;
+  try {
+    const emailDoc = await emailTrackingCollection.findOne({ id: emailId });
+    if (emailDoc && emailDoc.userId) {
+      userId = emailDoc.userId;
+    }
+  } catch (error) {
+    console.error("Error fetching email document for userId:", error);
+  }
+
   const openData = {
     id: crypto.randomBytes(16).toString("hex"),
     emailId,
@@ -222,17 +233,26 @@ app.get("/track/open/:emailId", async (req, res) => {
     timestamp: nowIso(),
     readingTime: null, // Will be updated when user closes email or after timeout
     readingStartTime: nowIso(),
+    userId: userId, // Store userId for filtering
   };
 
   try {
     await ensureEmailDocument(emailId, { recipientEmail });
     await emailOpensCollection.insertOne(openData);
+    
+    // Update email tracking with userId if we found it
+    const updateFields = {
+      $inc: { openCount: 1 },
+      $set: { lastOpenedAt: openData.timestamp, recipientEmail },
+    };
+    
+    if (userId) {
+      updateFields.$set.userId = userId;
+    }
+    
     await emailTrackingCollection.updateOne(
       { id: emailId },
-      {
-        $inc: { openCount: 1 },
-        $set: { lastOpenedAt: openData.timestamp, recipientEmail },
-      }
+      updateFields
     );
   } catch (error) {
     console.error("Error recording email open:", error);
@@ -314,6 +334,17 @@ app.get("/track/click/:emailId", async (req, res) => {
 
   console.log(`Link clicked: ${url} in email ${emailId} by ${recipientEmail}`);
 
+  // Get userId from email tracking document
+  let userId = null;
+  try {
+    const emailDoc = await emailTrackingCollection.findOne({ id: emailId });
+    if (emailDoc && emailDoc.userId) {
+      userId = emailDoc.userId;
+    }
+  } catch (error) {
+    console.error("Error fetching email document for userId:", error);
+  }
+
   const clickData = {
     id: crypto.randomBytes(16).toString("hex"),
     emailId,
@@ -322,17 +353,26 @@ app.get("/track/click/:emailId", async (req, res) => {
     userAgent,
     ipAddress,
     timestamp: nowIso(),
+    userId: userId, // Store userId for filtering
   };
 
   try {
     await ensureEmailDocument(emailId, { recipientEmail });
     await emailClicksCollection.insertOne(clickData);
+    
+    // Update email tracking with userId if we found it
+    const updateFields = {
+      $inc: { clickCount: 1 },
+      $set: { lastClickedAt: clickData.timestamp, recipientEmail },
+    };
+    
+    if (userId) {
+      updateFields.$set.userId = userId;
+    }
+    
     await emailTrackingCollection.updateOne(
       { id: emailId },
-      {
-        $inc: { clickCount: 1 },
-        $set: { lastClickedAt: clickData.timestamp, recipientEmail },
-      }
+      updateFields
     );
   } catch (error) {
     console.error("Error recording link click:", error);
@@ -359,6 +399,19 @@ app.get("/track/attachment/:attachmentId", async (req, res) => {
       return res.status(404).send("Attachment not found or invalid token");
     }
 
+    // Get userId from attachment or email tracking document
+    let userId = attachment.userId || null;
+    if (!userId && attachment.emailId) {
+      try {
+        const emailDoc = await emailTrackingCollection.findOne({ id: attachment.emailId });
+        if (emailDoc && emailDoc.userId) {
+          userId = emailDoc.userId;
+        }
+      } catch (error) {
+        console.error("Error fetching email document for userId:", error);
+      }
+    }
+
     const downloadData = {
       id: crypto.randomBytes(16).toString("hex"),
       attachmentId,
@@ -367,6 +420,7 @@ app.get("/track/attachment/:attachmentId", async (req, res) => {
       ipAddress,
       timestamp: nowIso(),
       type: action,
+      userId: userId, // Store userId for filtering
     };
 
     await attachmentDownloadsCollection.insertOne(downloadData);
@@ -519,6 +573,49 @@ app.get("/api/tracking-data", async (req, res) => {
     });
   } catch (error) {
     console.error("Error fetching tracking data:", error);
+    res
+      .status(500)
+      .json({ success: false, error: "Failed to fetch tracking data" });
+  }
+});
+
+// Get tracking data filtered by userId
+app.get("/api/get-tracking-data/:userId", async (req, res) => {
+  try {
+    const { userId } = req.params;
+    
+    if (!userId) {
+      return res.status(400).json({ success: false, error: "userId is required" });
+    }
+
+    console.log(`📊 Fetching tracking data for userId: ${userId}`);
+
+    const [
+      emailTracking,
+      emailOpens,
+      emailClicks,
+      attachmentTracking,
+      attachmentDownloads,
+    ] = await Promise.all([
+      emailTrackingCollection.find({ userId }).toArray(),
+      emailOpensCollection.find({ userId }).toArray(),
+      emailClicksCollection.find({ userId }).toArray(),
+      attachmentTrackingCollection.find({ userId }).toArray(),
+      attachmentDownloadsCollection.find({ userId }).toArray(),
+    ]);
+
+    console.log(`📊 Found ${emailTracking.length} emails, ${emailOpens.length} opens, ${emailClicks.length} clicks for userId: ${userId}`);
+
+    res.json({
+      success: true,
+      emailTracking,
+      emailOpens,
+      emailClicks,
+      attachmentTracking,
+      attachmentDownloads,
+    });
+  } catch (error) {
+    console.error("Error fetching tracking data by userId:", error);
     res
       .status(500)
       .json({ success: false, error: "Failed to fetch tracking data" });
