@@ -132,9 +132,28 @@ const ensureEmailDocument = async (emailId, defaults = {}) => {
     ...defaults,
   };
 
+  // Use upsert to create if doesn't exist, and also update userId if provided
+  const updateOperation = {
+    $setOnInsert: {
+      id: emailId,
+      sentAt: baseDefaults.sentAt,
+      status: baseDefaults.status,
+      openCount: baseDefaults.openCount,
+      clickCount: baseDefaults.clickCount,
+      attachmentDownloads: baseDefaults.attachmentDownloads,
+      attachmentOpens: baseDefaults.attachmentOpens,
+      recipientEmail: baseDefaults.recipientEmail,
+    }
+  };
+  
+  // If userId is provided, also set it (even on existing documents)
+  if (baseDefaults.userId) {
+    updateOperation.$set = { userId: baseDefaults.userId };
+  }
+
   await emailTrackingCollection.updateOne(
     { id: emailId },
-    { $setOnInsert: baseDefaults },
+    updateOperation,
     { upsert: true }
   );
 };
@@ -145,6 +164,8 @@ app.get("/track/open/:emailId", async (req, res) => {
   const { r: recipientEmail } = req.query;
   const userAgent = req.get("User-Agent") || "";
   const ipAddress = req.ip || req.connection.remoteAddress || "";
+
+  console.log(`📧 Tracking pixel requested: emailId=${emailId}, recipient=${recipientEmail}, IP=${ipAddress}, UA=${userAgent.substring(0, 50)}`);
 
   // Validation to prevent false opens
   const isAutomatedRequest = () => {
@@ -189,13 +210,13 @@ app.get("/track/open/:emailId", async (req, res) => {
   // Additional validation: Check if email was sent recently (within last 30 seconds)
   try {
     const emailDoc = await emailTrackingCollection.findOne({ id: emailId });
-    if (emailDoc) {
+    if (emailDoc && emailDoc.sentAt) {
       const sentTime = new Date(emailDoc.sentAt);
       const now = new Date();
       const timeDiff = now - sentTime;
       
       // If email was sent less than 30 seconds ago, it's likely a false open
-      if (timeDiff < 5000) { // 30 seconds
+      if (timeDiff < 30000) { // 30 seconds (30000ms)
         console.log(`Skipping immediate open tracking: ${emailId} - Email sent ${timeDiff}ms ago`);
         res.set({
           "Content-Type": "image/gif",
@@ -207,21 +228,30 @@ app.get("/track/open/:emailId", async (req, res) => {
         return res.send(transparentGif);
       }
     }
+    // If email document doesn't exist or doesn't have sentAt, continue with tracking
+    // This handles cases where the email was just sent and document might not be synced yet
   } catch (error) {
     console.error("Error checking email send time:", error);
+    // Continue with tracking even if check fails
   }
 
-  console.log(`Email opened: ${emailId} by ${recipientEmail} - User-Agent: ${userAgent}, IP: ${ipAddress}`);
+  console.log(`✅ Email opened: ${emailId} by ${recipientEmail} - User-Agent: ${userAgent}, IP: ${ipAddress}`);
 
   // Get userId from email tracking document
   let userId = null;
   try {
     const emailDoc = await emailTrackingCollection.findOne({ id: emailId });
-    if (emailDoc && emailDoc.userId) {
-      userId = emailDoc.userId;
+    if (emailDoc) {
+      console.log(`📋 Found email document for ${emailId}, userId: ${emailDoc.userId || 'none'}`);
+      if (emailDoc.userId) {
+        userId = emailDoc.userId;
+      }
+      // If email document exists but no userId, we'll try to preserve it when ensuring document
+    } else {
+      console.log(`⚠️ Email document not found for ${emailId}, will create it`);
     }
   } catch (error) {
-    console.error("Error fetching email document for userId:", error);
+    console.error("❌ Error fetching email document for userId:", error);
   }
 
   const openData = {
@@ -237,8 +267,16 @@ app.get("/track/open/:emailId", async (req, res) => {
   };
 
   try {
-    await ensureEmailDocument(emailId, { recipientEmail });
+    // Ensure email document exists, preserving userId if we found it
+    const emailDefaults = { recipientEmail };
+    if (userId) {
+      emailDefaults.userId = userId;
+    }
+    await ensureEmailDocument(emailId, emailDefaults);
+    console.log(`📝 Email document ensured for ${emailId}`);
+    
     await emailOpensCollection.insertOne(openData);
+    console.log(`✅ Email open recorded: ${openData.id} for email ${emailId}`);
     
     // Update email tracking with userId if we found it
     const updateFields = {
@@ -250,12 +288,13 @@ app.get("/track/open/:emailId", async (req, res) => {
       updateFields.$set.userId = userId;
     }
     
-    await emailTrackingCollection.updateOne(
+    const updateResult = await emailTrackingCollection.updateOne(
       { id: emailId },
       updateFields
     );
+    console.log(`📊 Email tracking updated: ${updateResult.modifiedCount} document(s) modified for ${emailId}`);
   } catch (error) {
-    console.error("Error recording email open:", error);
+    console.error("❌ Error recording email open:", error);
   }
 
   res.set({
