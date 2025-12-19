@@ -74,7 +74,7 @@ let googleUsersCollection;
 
 async function connectToDatabase() {
   await client.connect();
-  db = client.db(process.env.MONGO_DB_NAME || "altara_tracking");
+  db = client.db(process.env.MONGO_DB_NAME || "2ws");
 
   emailTrackingCollection = db.collection("email_tracking");
   emailOpensCollection = db.collection("email_opens");
