@@ -216,7 +216,7 @@ app.get("/track/open/:emailId", async (req, res) => {
       const timeDiff = now - sentTime;
       
       // If email was sent less than 30 seconds ago, it's likely a false open
-      if (timeDiff < 30000) { // 30 seconds (30000ms)
+      if (timeDiff < 5000) { // 30 seconds (30000ms)
         console.log(`Skipping immediate open tracking: ${emailId} - Email sent ${timeDiff}ms ago`);
         res.set({
           "Content-Type": "image/gif",
